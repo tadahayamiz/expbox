@@ -1,501 +1,445 @@
 from __future__ import annotations
 
 """
-Public-facing experiment lifecycle API.
+High-level experiment lifecycle API for expbox.
 
-Core functions:
-- init_exp(...) -> ExpContext
-- load_exp(...) -> ExpContext
-- save_exp(ctx) -> None
+This module provides the three main entry points that back the public
+top-level API:
 
-At the top level, these are exposed as `expbox.init`, `expbox.load`,
-`expbox.save` for ease of use.
+    import expbox as xb
 
-Design principles:
-- Local-first: everything lives under `results/<exp_id>/`.
-- Minimal surface: one context object (`ExpContext`) passed to user code.
-- No hard dependency on specific loggers or tracking services.
+    ctx = xb.init(...)
+    ctx = xb.load(...)
+    xb.save(ctx, ...)
+
+The responsibilities of this module are:
+
+- Orchestrate paths, metadata, config, and logger construction.
+- Delegate all disk I/O to :mod:`expbox.io`.
+- Delegate in-memory structures to :mod:`expbox.core`.
+- Provide a minimal, stable interface for Python, CLI, and notebooks.
+
+Design principles
+-----------------
+- Keep the number of public functions very small (init_exp, load_exp, save_exp).
+- Avoid heavy dependencies; only standard library is used here.
+- Be explicit about what is written to disk and when.
 """
 
-import subprocess
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Union
+from typing import Any, Dict, Mapping, Optional
 
-from .config import ConfigLike, load_config, snapshot_config
-from .context import ExpContext, ExpPaths, ExperimentMeta
-from .ids import IdStyle, LinkStyle, ensure_safe_exp_id, generate_exp_id
-from .logger import BaseLogger, FileLogger, LoggerKind, NullLogger, WandbLogger
-from .meta_io import load_meta, save_meta
-
-IdGenerator = Callable[[str, Path], str]
+from .core import ExpContext, ExpMeta
+from .exceptions import ResultsIOError
+from .ids import generate_exp_id, IdStyle
+from .io import (
+    ConfigLike,
+    ensure_experiment_dirs,
+    load_config,
+    load_meta,
+    save_meta,
+    snapshot_config,
+)
+from .logger import BaseLogger, FileLogger, NullLogger
 
 
 # ---------------------------------------------------------------------------
-# Git helpers
+# Git helpers (best-effort, no hard dependency)
 # ---------------------------------------------------------------------------
 
 
-def _find_git_root(start: Path) -> Optional[Path]:
+def _collect_git_metadata(project_root: Path) -> Dict[str, Any]:
     """
-    Walk up from `start` to find a `.git` directory.
+    Collect basic Git metadata for the current project, if available.
+
+    This function is intentionally best-effort:
+    - If the directory is not a git repository, returns an empty dict.
+    - If git is not installed or any command fails, returns an empty dict.
+
+    Parameters
+    ----------
+    project_root:
+        Directory assumed to be inside a git repository (typically ``Path.cwd()``).
 
     Returns
     -------
-    Path or None
-        Repository root if found, else None.
+    dict
+        A dictionary that may contain:
+        - "repo_root": absolute path to the git repository root
+        - "project_root": project root used for detection
+        - "commit": current HEAD commit hash
+        - "branch": current branch name (if available)
+        - "dirty": bool indicating uncommitted changes
+        - "remote": {"name": str, "url": str} if an "origin" remote exists
     """
-    cur = start.resolve()
-    for p in (cur, *cur.parents):
-        if (p / ".git").exists():
-            return p
-    return None
+    import subprocess
 
+    def _run(args: list[str]) -> Optional[str]:
+        try:
+            res = subprocess.run(
+                ["git", *args],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return res.stdout.strip()
+        except Exception:
+            return None
 
-def _run_git(args: list[str], cwd: Path) -> Optional[str]:
-    """
-    Run a git command and return stdout (stripped), or None on failure.
-    """
-    try:
-        proc = subprocess.run(
-            ["git", *args],
-            cwd=str(cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-    except Exception:
-        return None
+    repo_root_str = _run(["rev-parse", "--show-toplevel"])
+    if not repo_root_str:
+        return {}
 
-    if proc.returncode != 0:
-        return None
-    return proc.stdout.strip() or None
+    repo_root = Path(repo_root_str).resolve()
 
+    commit = _run(["rev-parse", "HEAD"])
+    branch = _run(["rev-parse", "--abbrev-ref", "HEAD"])
+    status_out = _run(["status", "--porcelain"])
+    dirty = bool(status_out)
 
-def _get_git_status(repo_root: Path) -> Optional[Dict[str, Any]]:
-    """
-    Collect basic git status information for the repository.
-
-    Returns
-    -------
-    dict or None
-        {
-          "commit": str,
-          "branch": str or None,
-          "dirty": bool,
-          "dirty_files": [str, ...],
-          "remote": {
-            "name": "origin",
-            "url": "...",
-            "github_commit_url": "https://github.com/.../commit/<hash>"  # optional
-          } or None,
-        }
-    """
-    commit = _run_git(["rev-parse", "HEAD"], cwd=repo_root)
-    if not commit:
-        return None
-
-    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root)
-    status_out = _run_git(["status", "--porcelain"], cwd=repo_root) or ""
-    dirty = bool(status_out.strip())
-
-    dirty_files = []
-    for line in status_out.splitlines():
-        if not line.strip():
-            continue
-        # format: "XY path"
-        if len(line) > 3:
-            dirty_files.append(line[3:])
-        else:
-            dirty_files.append(line.strip())
-
-    remote_url = _run_git(["config", "--get", "remote.origin.url"], cwd=repo_root)
+    remote_url = _run(["config", "--get", "remote.origin.url"])
     remote: Dict[str, Any] = {}
     if remote_url:
-        remote["name"] = "origin"
-        remote["url"] = remote_url
-
-        commit_url: Optional[str] = None
-        if "github.com" in remote_url:
-            base: Optional[str] = None
-            if remote_url.startswith("git@github.com:"):
-                path = remote_url[len("git@github.com:") :]
-                if path.endswith(".git"):
-                    path = path[:-4]
-                base = f"https://github.com/{path}"
-            elif remote_url.startswith("https://github.com/") or remote_url.startswith(
-                "http://github.com/"
-            ):
-                base = remote_url
-                if base.endswith(".git"):
-                    base = base[:-4]
-            if base:
-                commit_url = f"{base}/commit/{commit}"
-
-        if commit_url:
-            remote["github_commit_url"] = commit_url
+        remote = {"name": "origin", "url": remote_url}
 
     return {
+        "repo_root": str(repo_root),
+        "project_root": str(project_root.resolve()),
         "commit": commit,
         "branch": branch,
         "dirty": dirty,
-        "dirty_files": dirty_files,
         "remote": remote or None,
     }
 
 
-def _init_git_section() -> Dict[str, Any]:
-    """
-    Initialize the `git` section for ExperimentMeta at init_exp time.
-
-    - Uses current working directory to locate the repo.
-    - Records both `start` and initial `last` (same values).
-    """
-    start_path = Path.cwd()
-    repo_root = _find_git_root(start_path)
-    if repo_root is None:
-        return {}
-
-    status = _get_git_status(repo_root)
-    if status is None:
-        return {}
-
-    try:
-        project_relpath = str(start_path.relative_to(repo_root))
-    except ValueError:
-        project_relpath = None
-
-    now_iso = datetime.utcnow().isoformat()
-
-    git_section: Dict[str, Any] = {
-        "repo_root": str(repo_root),
-        "project_relpath": project_relpath,
-        "start": {
-            "commit": status["commit"],
-            "branch": status["branch"],
-            "dirty": status["dirty"],
-            "captured_at": now_iso,
-        },
-        "last": {
-            "commit": status["commit"],
-            "branch": status["branch"],
-            "dirty": status["dirty"],
-            "saved_at": None,
-        },
-        "dirty_files": status["dirty_files"],
-        "remote": status["remote"],
-    }
-    return git_section
-
-
-def _update_git_on_save(meta: ExperimentMeta) -> None:
-    """
-    Update the `git.last` section on each save_exp call.
-
-    - If repo_root is known, use it; otherwise try to rediscover.
-    - Does NOT create or push any commits.
-    """
-    try:
-        git_section: Dict[str, Any] = dict(meta.git) if meta.git else {}
-        repo_root_str = git_section.get("repo_root")
-        if repo_root_str:
-            repo_root = Path(repo_root_str)
-        else:
-            repo_root = _find_git_root(Path.cwd())
-            if repo_root is None:
-                return
-            git_section["repo_root"] = str(repo_root)
-
-        status = _get_git_status(repo_root)
-        if status is None:
-            return
-
-        last = dict(git_section.get("last") or {})
-        last.update(
-            {
-                "commit": status["commit"],
-                "branch": status["branch"],
-                "dirty": status["dirty"],
-                "saved_at": datetime.utcnow().isoformat(),
-            }
-        )
-        git_section["last"] = last
-        git_section["dirty_files"] = status["dirty_files"]
-        git_section["remote"] = status["remote"]
-
-        # If project_relpath is missing, try to fill it from current cwd.
-        if git_section.get("project_relpath") is None:
-            try:
-                git_section["project_relpath"] = str(Path.cwd().relative_to(repo_root))
-            except ValueError:
-                pass
-
-        meta.git = git_section
-        # Backward compatibility: keep git_commit in sync with last.commit
-        meta.git_commit = status["commit"]
-    except Exception:
-        # Git metadata should never break save_exp
-        return
-
-
-# ---------------------------------------------------------------------------
-# Logger helper
-# ---------------------------------------------------------------------------
-
-
-def _make_logger(
-    kind: LoggerKind,
-    project: str,
-    exp_id: str,
-    cfg: Mapping[str, Any],
-    log_dir: Path,
+def _build_logger(
+    backend: str,
+    logs_dir: Path,
+    artifacts_dir: Path,
 ) -> BaseLogger:
     """
-    Internal helper to construct a logger backend.
+    Construct a logger backend instance.
 
-    TODO: Add support for mlflow or multi-backend logging here.
+    Parameters
+    ----------
+    backend:
+        Name of the logger backend. Currently supported:
+        - "none" : :class:`NullLogger`
+        - "file" : :class:`FileLogger`
+    logs_dir:
+        Logs directory (only used for "file").
+    artifacts_dir:
+        Artifacts directory (only used for "file").
+
+    Returns
+    -------
+    BaseLogger
+
+    Raises
+    ------
+    ValueError
+        If an unknown backend is requested.
     """
-    if kind == "none":
+    backend = backend.lower()
+    if backend in ("none", "", "null"):
         return NullLogger()
-    if kind == "file":
-        return FileLogger(log_dir)
-    if kind == "wandb":
-        return WandbLogger(project=project, exp_id=exp_id, config=cfg)
-    raise ValueError(f"Unknown logger kind: {kind}")
+    if backend == "file":
+        return FileLogger(logs_dir=logs_dir, artifacts_dir=artifacts_dir)
+    # TODO: add "wandb" backend in a separate module to avoid hard dependency.
+    raise ValueError(f"Unsupported logger backend: {backend!r}")
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Public API functions (backing xb.init / xb.load / xb.save)
 # ---------------------------------------------------------------------------
 
 
 def init_exp(
-    project: str,
+    *,
+    project: str = "",
     title: Optional[str] = None,
     purpose: Optional[str] = None,
     config: ConfigLike = None,
-    logger: LoggerKind = "none",
-    results_root: Union[str, Path] = "results",
-
-    # exp_id settings
+    results_root: str | Path = "results",
     exp_id: Optional[str] = None,
     id_style: IdStyle = "datetime",
-    prefix: Optional[str] = None,
-    suffix: Optional[str] = None,
-    datetime_fmt: str = "%y%m%d-%H%M",
-    link_style: LinkStyle = "kebab",
-    id_generator: Optional[IdGenerator] = None,
+    id_prefix: Optional[str] = None,
+    id_suffix: Optional[str] = None,
+    logger: str = "none",
+    config_snapshot_name: str = "config.yaml",
+    status: Optional[str] = "running",
+    env_note: Optional[str] = None,
+    extra_meta: Optional[Dict[str, Any]] = None,
 ) -> ExpContext:
     """
-    Initialize a new experiment context.
+    Initialize a new experiment and return its context.
 
-    This function:
-        - Decides an exp_id (using the provided options or an id generator).
-        - Creates `results/<exp_id>/` and its subdirectories.
-        - Loads the configuration and saves a snapshot under artifacts/.
-        - Initializes a logger backend.
-        - Writes an initial meta.json (including Git metadata, if available).
+    This function performs the following steps:
+
+    1. Determine the experiment id (exp_id). If not provided, generate one
+       using :func:`expbox.ids.generate_exp_id`.
+    2. Create the experiment directory structure under ``results_root/exp_id``.
+    3. Load the provided config (mapping, path, or None) via
+       :func:`expbox.io.load_config`.
+    4. Snapshot the config into ``artifacts/config_snapshot_name`` if non-empty.
+    5. Collect basic Git metadata (best-effort).
+    6. Construct an :class:`ExpMeta` and write ``meta.json``.
+    7. Construct a logger backend (:class:`NullLogger` or :class:`FileLogger`).
+    8. Return an :class:`ExpContext` bundling everything.
 
     Parameters
     ----------
     project:
-        Logical project name (free-form string).
+        Logical project name. If empty, the current working directory name
+        may be a reasonable choice for callers.
     title:
-        Short experiment title.
+        Human-readable experiment title.
     purpose:
-        Short description of the experiment purpose.
+        Short free-text description of the experiment purpose.
     config:
-        Configuration source:
-        - None
-        - Mapping
-        - path to JSON/YAML file
-    logger:
-        Logger backend: "none", "file", or "wandb".
+        Configuration source. One of:
+        - None → empty dict
+        - Mapping → shallow copy
+        - str/Path → JSON or YAML file
     results_root:
-        Root directory under which experiments are stored, usually "results".
-
+        Root directory under which experiments are stored (default: "results").
     exp_id:
-        Explicit exp_id to use. If provided, no automatic generation is done.
+        Optional explicit experiment ID. If omitted, an ID is generated.
     id_style:
-        Style used when generating exp_id ("datetime", "date", "seq", "rand").
-    prefix:
-        Optional prefix for exp_id (used for non-"seq" styles).
-    suffix:
-        Optional suffix for exp_id (used for non-"seq" styles).
-    datetime_fmt:
-        Datetime format string for datetime-based styles.
-    link_style:
-        How to join parts: "kebab" -> "-", "snake" -> "_".
-    id_generator:
-        Optional custom function `(project, results_root) -> exp_id`.
-        If provided, this takes precedence over id_style.
+        Style for generated IDs (see :func:`generate_exp_id`).
+    id_prefix:
+        Optional prefix for generated IDs.
+    id_suffix:
+        Optional suffix for generated IDs.
+    logger:
+        Logger backend name ("none" or "file").
+    config_snapshot_name:
+        File name (relative to artifacts dir) to save the config snapshot as.
+    status:
+        Initial status string (e.g. "running", "queued").
+    env_note:
+        Optional free-text note about the environment.
+    extra_meta:
+        Optional extra key-value pairs stored in ``ExpMeta.extra``.
 
     Returns
     -------
     ExpContext
-        The initialized experiment context.
+        Fully constructed experiment context.
     """
-    results_root = Path(results_root)
+    project_root = Path.cwd()
+    results_root_path = Path(results_root).resolve()
 
-    # Decide exp_id
-    if exp_id is not None:
-        exp_id = ensure_safe_exp_id(exp_id)
-    elif id_generator is not None:
-        exp_id = ensure_safe_exp_id(id_generator(project, results_root))
-    else:
+    if not exp_id:
         exp_id = generate_exp_id(
-            project=project,
-            results_root=results_root,
-            id_style=id_style,
-            prefix=prefix,
-            suffix=suffix,
-            datetime_fmt=datetime_fmt,
-            link_style=link_style,
+            style=id_style,
+            prefix=id_prefix,
+            suffix=id_suffix,
         )
 
-    # Paths
-    paths = ExpPaths.create(results_root, exp_id)
+    exp_root = results_root_path / exp_id
+    paths = ensure_experiment_dirs(exp_root)
 
-    # Config
-    cfg = load_config(config)
-    cfg_snapshot_path = paths.artifacts / "config.yaml"
-    snapshot_config(cfg, cfg_snapshot_path)
-    rel_cfg_path = cfg_snapshot_path.relative_to(paths.root).as_posix()
+    # 1) Config loading & snapshot
+    cfg: Dict[str, Any] = load_config(config)
+    config_path_rel: Optional[str] = None
+    if cfg:
+        snapshot_path = paths.artifacts / config_snapshot_name
+        snapshot_config(cfg, snapshot_path)
+        # Store a path relative to experiment root for portability
+        config_path_rel = str(snapshot_path.relative_to(paths.root))
 
-    # Meta
-    meta = ExperimentMeta(
+    # 2) Git metadata
+    git_meta = _collect_git_metadata(project_root)
+    git_commit = git_meta.get("commit")
+
+    # 3) Fill metadata
+    if not project:
+        project = project_root.name
+
+    meta = ExpMeta(
         exp_id=exp_id,
         project=project,
         title=title,
         purpose=purpose,
-        config_path=rel_cfg_path,
+        git_commit=git_commit,
+        git=git_meta,
+        config_path=config_path_rel,
         logger_backend=logger,
+        status=status,
+        env_note=env_note,
+        extra=extra_meta or {},
     )
 
-    # Git metadata at init
-    git_section = _init_git_section()
-    if git_section:
-        meta.git = git_section
-        # For compatibility / convenience, also set git_commit = start.commit
-        start_info = git_section.get("start") or {}
-        commit = start_info.get("commit")
-        if isinstance(commit, str):
-            meta.git_commit = commit
+    # 4) Write meta.json to disk
+    save_meta(meta, paths.root)
 
-    # Logger
-    lg = _make_logger(
-        logger,
-        project=project,
-        exp_id=exp_id,
-        cfg=cfg,
-        log_dir=paths.logs,
+    # 5) Logger backend
+    logger_backend = _build_logger(
+        backend=logger,
+        logs_dir=paths.logs,
+        artifacts_dir=paths.artifacts,
     )
 
+    # 6) Construct context
     ctx = ExpContext(
         exp_id=exp_id,
         project=project,
         paths=paths,
         config=cfg,
         meta=meta,
-        logger=lg,
+        logger=logger_backend,
     )
 
-    save_meta(meta, paths.root / "meta.json")
     return ctx
 
 
 def load_exp(
     exp_id: str,
-    project: Optional[str] = None,
-    results_root: Union[str, Path] = "results",
+    *,
+    results_root: str | Path = "results",
+    logger: str = "none",
 ) -> ExpContext:
     """
-    Load an existing experiment context from `results/<exp_id>`.
+    Load an existing experiment and return its context.
+
+    This function:
+
+    1. Locates the experiment root at ``results_root / exp_id``.
+    2. Loads ``meta.json`` via :func:`expbox.io.load_meta`.
+    3. Loads the config snapshot if ``meta.config_path`` is set.
+    4. Constructs a logger backend (default: "none").
+    5. Returns an :class:`ExpContext`.
 
     Parameters
     ----------
     exp_id:
-        Experiment id (directory name under `results_root`).
-    project:
-        Optional override for `meta.project`.
-        If None, the value stored in meta.json is used.
+        ID of the experiment to load (directory name under results_root).
     results_root:
-        Root directory under which experiments are stored.
+        Root directory where experiments are stored (default: "results").
+    logger:
+        Logger backend to attach to the context. Default is "none". This is
+        intentionally decoupled from the logger used when the experiment was
+        originally run, so callers can decide whether to resume logging.
 
     Returns
     -------
     ExpContext
-        The reconstructed experiment context.
 
-    Notes
-    -----
-    - For now, W&B runs are not re-attached automatically. If meta.json
-      indicates `logger_backend="wandb"`, a NullLogger is used instead.
-      You can open the previous run manually using the stored info if needed.
-
-    TODO:
-        - Optionally re-attach W&B runs if desired.
-        - Add hooks for custom logger re-attachment logic.
+    Raises
+    ------
+    MetaNotFoundError
+        If meta.json is not found under the experiment root.
+    ResultsIOError
+        If loading meta or config fails.
     """
-    results_root = Path(results_root)
-    root = results_root / exp_id
-    meta_path = root / "meta.json"
-    if not meta_path.exists():
-        raise FileNotFoundError(f"meta.json not found for exp_id={exp_id}")
+    results_root_path = Path(results_root).resolve()
+    exp_root = results_root_path / exp_id
 
-    meta = load_meta(meta_path)
-    paths = ExpPaths.create(results_root, exp_id)
+    # Paths (ensure directories exist in case they were partially removed)
+    paths = ensure_experiment_dirs(exp_root)
 
-    cfg_rel = meta.config_path or "artifacts/config.yaml"
-    cfg_path = root / Path(cfg_rel)
-    cfg = load_config(cfg_path)
+    # Metadata
+    meta = load_meta(exp_root)
 
-    # Re-attach logger: file logger is safe to recreate; W&B becomes NullLogger for now.
-    if meta.logger_backend == "file":
-        lg = FileLogger(paths.logs)
+    # Config (reload from snapshot if available)
+    if meta.config_path:
+        cfg_path = exp_root / meta.config_path
+        cfg: Mapping[str, Any] = load_config(cfg_path)
     else:
-        lg = NullLogger()
+        cfg = {}
+
+    # Logger backend (fresh instance)
+    logger_backend = _build_logger(
+        backend=logger,
+        logs_dir=paths.logs,
+        artifacts_dir=paths.artifacts,
+    )
 
     ctx = ExpContext(
         exp_id=meta.exp_id,
-        project=meta.project if project is None else project,
+        project=meta.project,
         paths=paths,
         config=cfg,
         meta=meta,
-        logger=lg,
+        logger=logger_backend,
     )
     return ctx
 
 
-def save_exp(ctx: ExpContext) -> None:
+def save_exp(
+    ctx: ExpContext,
+    *,
+    status: Optional[str] = None,
+    final_note: Optional[str] = None,
+    update_git: bool = True,
+) -> None:
     """
-    Save (and optionally finalize) an experiment.
+    Finalize (or checkpoint) an experiment and persist its metadata.
 
     This function:
-        - Updates Git metadata (`meta.git.last`) if a Git repo is found.
-        - Sets `meta.finished_at` if it is not already set.
-        - Closes the logger.
-        - Writes meta.json to disk.
+
+    - Optionally updates the status (e.g. "done", "failed").
+    - Sets ``finished_at`` to the current UTC time.
+    - Optionally refreshes Git metadata (best-effort).
+    - Updates ``logger_backend`` to match the attached logger.
+    - Writes ``meta.json`` to disk.
+    - Closes the logger backend.
 
     Parameters
     ----------
     ctx:
-        The experiment context to save.
+        Experiment context to save.
+    status:
+        Optional new status string. If None, the existing status is kept.
+    final_note:
+        Optional note summarizing the outcome of this experiment.
+    update_git:
+        If True, re-collects Git metadata at save-time. If False, keeps the
+        original values (useful for debugging or deterministic tests).
 
-    TODO:
-        - Allow registering user-defined "on_save" hooks for custom cleanup.
+    Raises
+    ------
+    ResultsIOError
+        If writing meta.json fails.
     """
-    # Update Git metadata first (best-effort, never raises)
-    _update_git_on_save(ctx.meta)
+    meta = ctx.meta
 
-    if ctx.meta.finished_at is None:
-        ctx.meta.finished_at = datetime.utcnow().isoformat()
+    # Status and notes
+    if status is not None:
+        meta.status = status
+    if final_note is not None:
+        meta.final_note = final_note
 
+    # Timestamps
+    meta.finished_at = datetime.utcnow().isoformat()
+
+    # Refresh git metadata if requested
+    if update_git:
+        git_meta = _collect_git_metadata(Path.cwd())
+        # Preserve any existing git keys but update with current info
+        if meta.git:
+            merged_git = dict(meta.git)
+            merged_git.update({k: v for k, v in git_meta.items() if v is not None})
+        else:
+            merged_git = git_meta
+        meta.git = merged_git
+        if git_meta.get("commit"):
+            meta.git_commit = git_meta["commit"]
+
+    # Logger backend name
+    if isinstance(ctx.logger, BaseLogger):
+        meta.logger_backend = getattr(ctx.logger, "backend_name", "unknown")
+
+    # Persist meta.json
+    save_meta(meta, ctx.paths.root)
+
+    # Close logger (best-effort)
     try:
         ctx.logger.close()
-    except Exception:
-        # Logging errors on close are non-fatal.
-        pass
-
-    save_meta(ctx.meta, ctx.paths.root / "meta.json")
+    except Exception as e:  # pragma: no cover
+        # We do not want a logging close failure to break the experiment.
+        raise ResultsIOError(f"Failed to close logger for exp {meta.exp_id}: {e}")

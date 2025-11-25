@@ -19,3 +19,14 @@ dev = ["pytest>=8.0", "pytest-cov"]
 
 [project.urls]
 Homepage = "https://github.com/mizuno-group/expbox"
+
+[project.scripts]
+expbox = "expbox.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["expbox"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]

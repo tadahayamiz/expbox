@@ -1,99 +1,71 @@
-# expbox
+# 📦 expbox
 
-*A lightweight, local-first experiment box for Python.*
+*A lightweight, git-aware experiment box for Python.*
 
-`expbox` gives each experiment its own **box** — a directory like `results/<exp_id>/` — and a small Python API to manage configs, logs, and metadata in a uniform way across scripts, notebooks, and projects.
+`expbox` gives each experiment a self-contained **box** (`results/<exp_id>/`) that records:
 
----
+* configuration snapshot
+* metrics & logs
+* artifacts (models/tables)
+* figures
+* auto-captured Git metadata (commit, branch, dirty state)
+* free-form metadata (notes, env info)
 
-## Features
+The API remains extremely small:
 
-- **Minimal API**
+```python
+import expbox as xb
 
-  ```python
-  import expbox as xb
-
-  ctx = xb.init(...)   # start new experiment
-  ctx = xb.load(...)   # reload existing experiment
-  xb.save(ctx)         # finalize and record metadata
-    ````
-
-* **Local-first structure**
-
-  Every experiment lives under:
-
-  ```text
-  results/<exp_id>/
-    meta.json         # metadata (source of truth)
-    artifacts/        # config snapshot, models, tables
-    figures/          # plots, visualizations
-    logs/             # metrics.jsonl, logs
-    notebooks/        # optional experiment-specific notebooks
-  ```
-
-* **Flexible experiment IDs**
-
-  * datetime-based (`YYMMDD-HHMM` by default)
-  * sequential (`proj-01`, `proj-02`, …)
-  * random IDs
-  * custom patterns via user-defined generator
-  * `kebab` (`-`) or `snake` (`_`) linking of parts
-
-* **Pluggable logging backends**
-
-  * `none`: no logging, but unified interface
-  * `file`: local JSONL + PNG
-  * `wandb`: optional Weights & Biases integration
-
-* **Tool-agnostic integration**
-
-  * `meta.json` is designed as the single source of truth
-  * easy to sync into PKM tools (e.g. Notion, Obsidian)
-  * easy to connect to experiment trackers (e.g. W&B, MLflow) via URLs inside `meta.extra`
-
-* **Distributed & HPC-ready**
-
-  * Safe for multi-GPU / multi-node environments (DDP / MPI / SLURM)
-  * Standard rank-0 logging pattern — only rank 0 writes logs and metadata
-  * No special dependencies; works on NFS / Lustre / GPFS / local SSD
-  * Easy to redirect `results_root` to cluster storage (e.g. `$SCRATCH`)
+ctx = xb.init(...)
+ctx = xb.load(...)
+xb.save(ctx)
+```
 
 ---
 
-## Philosophy
+## 🚀 Features
 
-`expbox` is built around three ideas:
+### ✔ Git-aware, GitHub-ready
 
-1. **1 experiment = 1 directory**
+* On `init` / `save`, expbox records:
 
-   All files for a run — config snapshot, logs, figures, notebooks — are under `results/<exp_id>/`. You can zip that directory and have everything you need to reproduce.
+  * commit hash
+  * branch
+  * dirty flag
+  * remote `origin` URL
+* This makes **experiments inherently reproducible across machines and collaborators**.
 
-2. **Context object, not framework**
+### ✔ Local-first, compatible with any environment
 
-   User code receives a single `ExpContext`:
+* Works the same on **laptop, Colab, on-prem GPU boxes, HPC (SLURM, MPI, DDP)**.
+* Uses a **rank-0 logging strategy**, avoiding write contention on shared filesystems (NFS / Lustre / GPFS).
 
-   ```python
-   ctx.exp_id
-   ctx.paths   # root, artifacts, logs, figures, notebooks
-   ctx.config  # dict-like config
-   ctx.meta    # ExperimentMeta
-   ctx.logger  # logger backend
-   ```
+### ✔ Friendly with external tools
 
-   This keeps your training / analysis code independent of expbox internals.
+expbox is intentionally small, but integrates smoothly with:
 
-3. **Optional integrations, never mandatory**
+* **Notion / Obsidian** → store `meta.json` as a structured entry
+* **Weights & Biases** → optional `wandb` logger
+* **MLflow** → simply push paths or metrics from `ctx.paths`
+* **GitHub** → commit only lightweight metadata and figures
 
-   * You can stay purely local.
-   * You can enable W&B with a flag.
-   * You can mirror `meta.json` into Notion for human-friendly tracking.
-   * None of these integrations are required for `expbox` to be useful.
+### ✔ A single directory per experiment
+
+```
+results/<exp_id>/
+  meta.json
+  artifacts/
+    config.yaml
+    model.pt
+  logs/
+    metrics.jsonl
+  figures/
+    loss_curve.png
+```
 
 ---
 
-## Installation
-
-Minimal installation (Python ≥ 3.9):
+## 📦 Installation
 
 ```bash
 pip install expbox
@@ -102,316 +74,183 @@ pip install expbox
 Optional extras:
 
 ```bash
-# YAML config support
-pip install "expbox[yaml]"
+pip install "expbox[yaml]"    # YAML config support
+pip install "expbox[wandb]"   # W&B logger backend
+```
 
-# W&B logger support
-pip install "expbox[wandb]"
+Dev install:
+
+```bash
+git clone https://github.com/<your-org>/expbox
+cd expbox
+pip install -e .[dev]
+pytest
 ```
 
 ---
 
-## Quick Start
-### 0. Project layout & where to call `init`
+## 🔧 Quick Start (Python)
 
-The recommended layout is:
-
-```text
-workspace/
-  project_x/
-    src/
-    configs/
-    results/      # created automatically by expbox (default)
-  project_y/
-    ...
-```
-
-You typically:
-
-* **run your scripts / notebooks from each project’s top directory**, e.g. `workspace/project_x`
-* call `xb.init(...)` inside code that is executed in that project
-* by default, `results_root="results"` is **relative to the current working directory**, so:
-
-  * if you run from `workspace/project_x`, you get `workspace/project_x/results/...`
-  * if you prefer a shared results area, you can set `results_root` explicitly, e.g. `results_root="../shared_results"`.
-
-This makes it easy to keep experiments **project-local** by default, while still allowing custom layouts when needed.
-
----
-
-
-### 1. Basic usage
-
-**Note:**  
-If you run distributed training (DDP / MPI / SLURM),  
-use `expbox` only on **rank 0**.  
-See the FAQ section for a full example and recommended patterns.
-
+Below is a **minimal deep-learning-style loop** showing metrics logging and figure output.
 
 ```python
 import expbox as xb
-
-# Start a new experiment
-ctx = xb.init(
-    project="DrugScreen",
-    title="SSL baseline",
-    purpose="Check KD effect in liver slides",
-    config="configs/ssl.yaml",   # dict / JSON / YAML
-    logger="file",               # "none" / "file" / "wandb"
-)
-
-# Use in your training loop
-for step in range(100):
-    loss = 0.1 * step
-    ctx.logger.log_metrics({"loss": loss}, step=step)
-
-# Save a figure
+import torch
 import matplotlib.pyplot as plt
 
-fig = plt.figure()
-plt.plot([1, 2, 3], [3, 2, 1])
-ctx.logger.log_figure(fig, "example_plot")
-
-# Final notes and finalize
-ctx.meta.env_note = "colab pro+"
-ctx.meta.final_note = "works; next: try lr=1e-4"
-xb.save(ctx)
-```
-
-This creates a structure like:
-
-```text
-results/
-  250124-1530/
-    meta.json
-    artifacts/config.yaml
-    logs/metrics.jsonl
-    logs/example_plot.png
-    figures/
-    notebooks/
-```
-
----
-
-### 2. Using W&B as the logger backend
-
-```python
-import expbox as xb
-
+# 1) Start a new experiment
 ctx = xb.init(
-    project="DrugScreen",
-    config={"lr": 1e-3},
-    logger="wandb",
+    project="ToxModel",
+    title="baseline",
+    config={"lr": 1e-3, "epochs": 3},
+    logger="file",      # "none" | "file" | "wandb"
 )
 
-# Training loop
+# Dummy model / optimizer
+model = torch.nn.Linear(10, 1)
+opt = torch.optim.Adam(model.parameters(), lr=ctx.config["lr"])
+
+# 2) Training loop (log metrics)
 for step in range(50):
-    loss = 0.05 * step
-    ctx.logger.log_metrics({"loss": loss}, step=step)
+    loss = (model(torch.randn(4, 10)) ** 2).mean()
+    loss.backward(); opt.step(); opt.zero_grad()
 
-# Optionally record the W&B URL into meta.extra
-ctx.meta.extra["wandb_url"] = ctx.logger.run.url
+    ctx.logger.log_metrics(step=step, loss=float(loss))
+
+# 3) Save a figure
+plt.plot([float(i) for i in range(50)])
+plt.title("Dummy Curve")
+fig_path = ctx.paths.figures / "curve.png"
+plt.savefig(fig_path)
+
+# 4) Finalize
+ctx.meta.final_note = "baseline run finished"
 xb.save(ctx)
 ```
 
-You now have:
-
-* Local experiment structure in `results/<exp_id>/`
-* A W&B run tracking the same metrics and figures
-* The W&B URL recorded in `meta.json`
-
 ---
 
-### 3. Recording the experiment in Notion
+## 🧪 Quick Start (CLI)
 
-After the run, you can sync `meta.json` into a Notion database.
+```bash
+# Create a new experiment
+exp_id=$(expbox init --project MyProj --config configs/base.yaml --logger file)
+echo "Experiment: $exp_id"
 
-```python
-import json
-from notion_client import Client
-import expbox as xb
-
-# Reload context if needed
-ctx = xb.load(exp_id="250124-1530")
-meta_path = ctx.paths.root / "meta.json"
-meta = json.load(open(meta_path, encoding="utf-8"))
-
-summary = {
-    "exp_id": meta["exp_id"],
-    "project": meta["project"],
-    "title": meta.get("title"),
-    "purpose": meta.get("purpose"),
-    "created_at": meta["created_at"],
-    "finished_at": meta.get("finished_at"),
-    "results_path": str(ctx.paths.root),
-    "config_path": str(ctx.paths.artifacts / "config.yaml"),
-    "wandb_url": meta.get("extra", {}).get("wandb_url"),
-}
-
-notion = Client(auth=NOTION_API_TOKEN)
-
-notion.pages.create(
-    parent={"database_id": NOTION_DB_ID},
-    properties={
-        "Experiment ID": {"title": [{"text": {"content": summary["exp_id"]}}]},
-        "Project": {"rich_text": [{"text": {"content": summary["project"]}}]},
-        "Title": {"rich_text": [{"text": {"content": summary["title"] or ''}}]},
-        "Purpose": {"rich_text": [{"text": {"content": summary["purpose"] or ''}}]},
-        "Created": {"date": {"start": summary["created_at"]}},
-        "Finished": {"date": {"start": summary["finished_at"]}} if summary["finished_at"] else None,
-        "Results Path": {"url": summary["results_path"]},
-        "Config": {"url": summary["config_path"]},
-        "WandB": {"url": summary["wandb_url"]} if summary["wandb_url"] else None,
-    },
-)
+# Finalize
+expbox save "$exp_id" --status done --final-note "completed"
 ```
 
-This lets you browse experiments in Notion while keeping `expbox` as the technical source of truth.
-
 ---
 
-## FAQ
+## 🧠 HPC / Distributed Training (rank-0 pattern)
 
-### Q: Why not just use MLflow?
-
-MLflow is powerful but relatively heavy.
-`expbox` is deliberately small:
-
-* no servers, databases, or UIs
-* just directories, JSON/YAML, and a tiny API
-
-You can still add MLflow on top if you want.
-
----
-
-### Q: Does this replace W&B?
-
-No. `expbox` treats W&B as an **optional backend**:
-
-* if `logger="wandb"` → metrics/figures go to W&B
-* if `logger="file"`  → metrics/figures go to local files
-* if `logger="none"`  → no logging, but your code does not change
-
----
-
-### Q: Is this suitable for notebooks?
-
-Yes. That’s one of the main use-cases:
-
-```python
-import expbox as xb
-ctx = xb.init(project="NotebookDemo")
-# … run cells …
-xb.save(ctx)
-```
-
-You always know where outputs go (`results/<exp_id>/`), and you can paste the `exp_id` into Notion or W&B.
-
----
-
-### Q: How do I customize `exp_id`?
-
-* datetime-based (default):
-
-  ```python
-  ctx = xb.init(project="MyProj")
-  # exp_id: "250124-1530"
-  ```
-
-* with prefix/suffix:
-
-  ```python
-  ctx = xb.init(
-      project="MyProj",
-      prefix="rbc",
-      suffix="v1",
-      link_style="snake",
-  )
-  # exp_id: "rbc_250124-1530_v1"
-  ```
-
-* sequential:
-
-  ```python
-  ctx = xb.init(project="MyProj", id_style="seq")
-  # exp_id: "myproj-01", then "myproj-02", ...
-  ```
-
-* fully custom:
-
-  ```python
-  def my_id(project, root):
-      return "mouseA_kidney_01"
-
-  ctx = xb.init(project="MyProj", id_generator=my_id)
-  ```
-
----
-
-
-### Q: Can I use expbox in distributed training on HPC clusters (DDP / MPI / SLURM)?
-
-Yes — expbox works well in HPC and distributed environments.  
-The recommended pattern is the same as used by most modern ML frameworks:
-
-**Only rank 0 uses expbox (init / log / save).**  
-Other ranks do not create or write experiment files.
-
-This avoids file-write contention on HPC filesystems (NFS / Lustre / GPFS).
-
-#### Example (generic DDP / MPI / SLURM)
+expbox is safe on HPC clusters when **only rank 0** writes experiment files.
 
 ```python
 import os
-from pathlib import Path
 import expbox as xb
 
-# Detect rank from common env vars (MPI, PyTorch DDP, SLURM)
-rank = int(
-    os.environ.get("OMPI_COMM_WORLD_RANK",
-    os.environ.get("PMI_RANK",
-    os.environ.get("RANK", 0)))
-)
+rank = int(os.environ.get("RANK", 0))  # DDP / SLURM / MPI
 
-# Choose a results directory (local or HPC storage)
-RESULTS_ROOT = Path(os.environ.get("SCRATCH_RESULTS", "./results"))
-
-# Initialize expbox only on rank 0
 if rank == 0:
-    ctx = xb.init(
-        project="MyProj",
-        config="configs/train.yaml",
-        logger="file",        # or "wandb"
-        results_root=RESULTS_ROOT,
-    )
+    ctx = xb.init(project="HPC-demo", config="configs/train.yaml", logger="file")
 else:
     ctx = None
 
-# Training loop
-for step in range(num_steps):
-    loss = compute_loss(...)
-    if rank == 0 and ctx is not None:
-        ctx.logger.log_metrics({"loss": float(loss)}, step=step)
+for step in range(100):
+    loss = train_step()
+    if rank == 0:
+        ctx.logger.log_metrics(step=step, loss=float(loss))
 
-# Finalize
-if rank == 0 and ctx is not None:
-    ctx.meta.env_note = f"HPC job {os.environ.get('SLURM_JOB_ID', '')}"
-    xb.save(ctx)
-
+if rank == 0:
+    xb.save(ctx, status="done")
 ```
+
+Works on:
+
+* DDP (PyTorch)
+* SLURM (MPI/OpenMPI)
+* Horovod
+* Any shared filesystem (NFS / Lustre / GPFS)
 
 ---
 
-## License
+## 🗃 Git Integration & What to Commit
 
-`expbox` is released under the **MIT License**. See `LICENSE` for details.
+**Recommended `.gitignore`:**
 
+```gitignore
+# heavy logs & artifacts out of git
+results/*/logs/
+results/*/artifacts/*
 
-## Authors
-- [Tadahaya Mizuno](https://github.com/tadahayamiz)  
-    - correspondence  
+# optionally
+# results/*/figures/
 
-## Contact
-If you have any questions or comments, please feel free to create an issue on github here, or email us:  
-- tadahaya[at]gmail.com  
-    - lead contact  
+# meta.json and config.yaml are kept on git
+!results/*/artifacts/config.yaml
+
+```
+
+**Commit manually** only lightweight files:
+
+```
+results/<exp_id>/meta.json
+results/<exp_id>/artifacts/config.yaml
+results/<exp_id>/figures/*.png   # optional
+```
+
+This keeps heavy models/logs local while GitHub stores the reproducibility metadata.
+
+---
+
+## 🗂 External Tools
+
+### Notion / Obsidian
+
+Just read `results/<exp_id>/meta.json` and push fields into your PKM database.
+This makes experiment tracking human-friendly while keeping data in-repo.
+
+### Weights & Biases
+
+Enable with:
+
+```python
+ctx = xb.init(..., logger="wandb")
+```
+
+W&B run URL can be stored in:
+
+```python
+ctx.meta.extra["wandb_url"] = ctx.logger.run.url
+```
+
+### MLflow
+
+Use `ctx.paths.artifacts` to log models / tables to MLflow manually.
+MLflow and expbox do **not** conflict.
+
+---
+
+## 📘 More Documentation
+
+To keep the README short, detailed documentation is in:
+
+* module docstrings (`expbox.api`, `expbox.core`, `expbox.io`, `expbox.logger`)
+* upcoming `/docs/` directory with examples & recipes
+
+---
+
+## 📝 License
+
+MIT License.
+
+---
+
+## 👤 Author
+
+**Tadahaya Mizuno**
+tadahayamiz (at) gmail.com
+
+---
