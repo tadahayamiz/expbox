@@ -14,9 +14,9 @@ Typical usage
     xb.init(project="demo", logger="file")
     for step in range(100):
         loss = ...
-        xb.logger.log_metrics(step=step, loss=float(loss))
+        xb.log_metrics(step=step, loss=float(loss))
 
-    xb.meta.final_note = "seed sweep finished"
+    xb.final_note("baseline run finished")
     xb.save()
 
 The currently active "box" (experiment) is:
@@ -32,11 +32,11 @@ Advanced users can still access the lower-level API:
 """
 
 from importlib.metadata import PackageNotFoundError, version
-from typing import Optional
+from typing import Any, Optional
 
 from .api import init_exp, load_exp, save_exp
 from .core import ExpContext, ExpMeta, ExpPaths
-from .io import set_active_exp_id, get_active_exp_id
+from .io import get_active_exp_id, set_active_exp_id
 
 # ---------------------------------------------------------------------------
 # Package version
@@ -44,7 +44,8 @@ from .io import set_active_exp_id, get_active_exp_id
 
 try:
     __version__ = version("expbox")
-except PackageNotFoundError:  # pragma: no cover
+except PackageNotFoundError:  # pragma: no cover - dev / editable install etc.
+    # Fallback for editable installs or non-standard environments.
     __version__ = "0.0.0"
 
 
@@ -78,7 +79,7 @@ def get_active() -> ExpContext:
 
 
 # ---------------------------------------------------------------------------
-# Public high-level API
+# Public high-level lifecycle API
 # ---------------------------------------------------------------------------
 
 
@@ -126,7 +127,8 @@ def load(
     set_active:
         If True (default), the loaded experiment becomes the active box.
     **kwargs:
-        Passed through to :func:`expbox.api.load_exp` (e.g., results_root, logger).
+        Passed through to :func:`expbox.api.load_exp`
+        (e.g., results_root, logger).
 
     Returns
     -------
@@ -174,6 +176,90 @@ def save(
 
 
 # ---------------------------------------------------------------------------
+# Public high-level logging & meta shortcuts
+# ---------------------------------------------------------------------------
+
+
+def log_metrics(step: Optional[int] = None, **metrics: Any) -> None:
+    """
+    Log scalar metrics to the active experiment.
+
+    This is a thin wrapper around ``get_active().logger.log_metrics(...)``.
+    """
+    ctx = _require_active()
+    ctx.logger.log_metrics(step=step, **metrics)
+
+
+def log_table(name: str, table: Any) -> None:
+    """
+    Log a tabular object (e.g., a pandas DataFrame) to the active experiment.
+
+    By default this writes ``<name>.csv`` under ``paths.artifacts`` if the
+    object implements a ``to_csv(path)`` method. This keeps expbox free of a
+    hard dependency on pandas while supporting common workflows.
+
+    Parameters
+    ----------
+    name:
+        Logical table name (without extension).
+    table:
+        An object with a ``to_csv(path)`` method (e.g., pandas.DataFrame).
+    """
+    ctx = _require_active()
+    path = ctx.paths.artifacts / f"{name}.csv"
+    to_csv = getattr(table, "to_csv", None)
+    if to_csv is None:
+        raise TypeError(
+            "log_table expects an object with a .to_csv(path) method "
+            f"(got {type(table)!r})"
+        )
+    to_csv(path)
+
+
+def log_figure(name: str, fig: Any, *, dpi: int = 150) -> None:
+    """
+    Log a matplotlib-like figure to the active experiment.
+
+    This saves ``<name>.png`` under ``paths.figures`` by calling
+    ``fig.savefig(path, dpi=dpi, bbox_inches=\"tight\")``.
+
+    Parameters
+    ----------
+    name:
+        Logical figure name (without extension).
+    fig:
+        An object with a ``savefig(path, ...)`` method (e.g., matplotlib.Figure).
+    dpi:
+        Resolution for the saved PNG (default: 150).
+    """
+    ctx = _require_active()
+    path = ctx.paths.figures / f"{name}.png"
+    savefig = getattr(fig, "savefig", None)
+    if savefig is None:
+        raise TypeError(
+            "log_figure expects an object with a .savefig(path, ...) method "
+            f"(got {type(fig)!r})"
+        )
+    savefig(path, dpi=dpi, bbox_inches="tight")
+
+
+def final_note(text: str) -> None:
+    """
+    Set the final_note field on the active experiment's metadata.
+    """
+    ctx = _require_active()
+    ctx.meta.final_note = text
+
+
+def set_status(status: str) -> None:
+    """
+    Set the status field on the active experiment's metadata.
+    """
+    ctx = _require_active()
+    ctx.meta.status = status
+
+
+# ---------------------------------------------------------------------------
 # Dynamic attribute forwarding to the active context
 # ---------------------------------------------------------------------------
 
@@ -200,6 +286,11 @@ __all__ = [
     "load",
     "save",
     "get_active",
+    "log_metrics",
+    "log_table",
+    "log_figure",
+    "final_note",
+    "set_status",
     "ExpContext",
     "ExpMeta",
     "ExpPaths",

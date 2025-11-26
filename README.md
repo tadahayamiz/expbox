@@ -1,426 +1,366 @@
-# expbox
+# expbox  
+*A lightweight, local-first experiment box for Python.*
 
-*A lightweight, non-intrusive, git-aware experiment box for Python.*
+`expbox` gives each experiment its own **box** — a directory such as:
 
-`expbox` attaches a lightweight **box** (`results/<exp_id>/`) to your project that records:
+```text
+results/
+  <exp_id>/
+    meta.json
+    artifacts/
+    logs/
+    figures/
+    notebooks/
+````
 
-* config snapshot
-* metrics & logs
-* artifacts (models/tables)
-* figures
-* automatically captured Git metadata (commit, branch, dirty state, remote URL)
-* optional free-form metadata (notes, environment info)
-
-**It never dictates your project structure or workflow.**
-It simply adds a `results/` directory and stays invisible until you want it.
-
-```python
-import expbox as xb
-
-ctx = xb.init(...)
-xb.save(ctx)
-ctx = xb.load(...)
-```
+It provides a **minimal, non-intrusive Python API** for managing configs, logs, metadata, and reproducibility information.
+No servers, no daemons, no databases — everything lives in your project folder.
 
 ---
 
 ## Features
 
-### Git-aware, GitHub-friendly
+* **Active Box API**
+  `xb.init()` / `xb.load()` makes an experiment “active”, and
+  `xb.log_metrics`, `xb.log_table`, `xb.log_figure`, `xb.final_note`, `xb.save()`
+  automatically operate on it.
 
-On every `init` and `save`, expbox captures:
+* **Local-first, append-only, non-destructive**
+  expbox **never deletes your files**.
+  Saving is always incremental and safe.
 
-* current commit (`HEAD`)
-* branch
-* dirty flag + list of modified files
-* remote origin URL
-* GitHub commit URL (if applicable)
+* **Reproducibility baked in**
 
-This builds **true reproducibility** into your normal workflow.
+  * config snapshot (`artifacts/config.yaml`)
+  * Git state (`start_commit`, `last_commit`, `dirty_files`)
+  * metadata timestamping (`created_at`, `finished_at`)
 
-### Non-intrusive by design
+* **Zero magic**
+  Files go exactly where you expect them to go.
+  You can inspect everything manually in `results/<exp_id>/`.
 
-* No required project template
-* No code generation
-* No assumptions about data
-* expbox *only* writes inside `results/<exp_id>/`
-* Your repository remains entirely yours
+* **CLI included**
+  For quick scripting:
 
-### Local-first, HPC-safe
-
-* Works on laptops, Colab, on-prem GPU servers, and HPC clusters
-* Rank-0 logging avoids filesystem contention
-* No external dependencies unless you opt in (e.g., wandb)
+  ```bash
+  expbox init ...
+  expbox load <exp_id>
+  expbox save <exp_id> --status done
+  ```
 
 ---
 
-## Installation
+# Quick Start (Python)
+
+```python
+import expbox as xb
+
+# 1) create a new experiment box (also becomes the active box)
+xb.init(project="demo", config={"lr": 1e-3}, logger="file")
+
+# 2) log metrics, tables, and figures
+for step in range(100):
+    loss = ...
+    xb.log_metrics(step=step, loss=float(loss))
+
+xb.log_table("eval", df)        # df: e.g., pandas.DataFrame
+xb.log_figure("roc", fig)       # fig: e.g., matplotlib.figure.Figure
+
+# 3) add a final note and save
+xb.final_note("Initial test run.")
+xb.set_status("done")
+xb.save()
+```
+
+The following shortcuts always refer to the **active box**:
+
+```python
+xb.paths      # directory paths (root, artifacts, logs, figures, notebooks)
+xb.config     # configuration dict
+xb.meta       # experiment metadata object
+xb.logger     # logger backend (NullLogger or FileLogger)
+xb.exp_id     # experiment ID (e.g., "241126-1030-demo")
+xb.project    # project name
+```
+
+---
+
+# Using Existing Boxes
+
+```python
+# Load an existing experiment and make it active
+xb.load("241126-1030-demo")
+
+# More logs…
+xb.log_metrics(step=200, lr=1e-4)
+xb.save()
+```
+
+You can also load without specifying the ID:
+
+```python
+xb.load()   # loads the ID recorded in .expbox/active
+```
+
+`.expbox/active` is a small text file stored in your project root that records the last active experiment id.
+
+---
+
+# Directory Structure
+
+After running:
+
+```python
+xb.init(project="demo")
+```
+
+you get:
+
+```text
+results/
+  241126-1030-demo/
+    meta.json
+    artifacts/
+      config.yaml
+    logs/
+      metrics.jsonl
+    figures/
+    notebooks/
+```
+
+* `artifacts/` : models, tables, and other derived files
+  (`xb.log_table` saves `*.csv` here by default)
+* `logs/`      : scalar metrics (`metrics.jsonl`)
+* `figures/`   : images saved via `xb.log_figure`
+* `notebooks/` : optional notebook exports
+
+---
+
+# Usage Patterns (Best Practices)
+
+## 1. Scratch Box Mode
+
+**For early, messy, exploratory experiments**
+
+* Use a **single box** for a while
+* Let files accumulate
+* `save()` periodically to capture notes, Git state, and timestamps
+
+This is like an “experiment notebook page”.
+
+```python
+xb.init(project="scratch-demo")
+
+for trial in range(20):
+    ...
+    xb.log_metrics(step=trial, acc=float(acc))
+    xb.save()
+```
+
+---
+
+## 2. Story Box Mode
+
+**When results start to matter (e.g., for papers or reports)**
+
+* Create a **new box per story**
+  (ablation study, figure generation, hyperparameter sweep, etc.)
+* Organize artifacts using subfolders or filenames
+* Keep each box clean and meaningful
+
+```python
+xb.init(project="paperX_fig3")
+
+for seed in [0, 1, 2]:
+    run_dir = xb.paths.artifacts / f"seed{seed}"
+    run_dir.mkdir(exist_ok=True)
+    ...
+    torch.save(model.state_dict(), run_dir / "model.pt")
+    xb.log_metrics(step=seed, val_auc=float(auc))
+
+xb.final_note("Ablation experiments for Figure 3")
+xb.set_status("done")
+xb.save()
+```
+
+---
+
+## A very important invariant
+
+### **expbox never deletes anything.**
+
+* `save()` only appends metadata and logs.
+* No automatic cleanup or overwriting of artifacts.
+* If you want a clean directory:
+
+  1. **Start a new box (`xb.init()`), or**
+  2. Delete files manually via `xb.paths.*` (your responsibility).
+
+This preserves safety, transparency, and local-first principles.
+
+---
+
+# CLI Usage
+
+The CLI wraps the same high-level API.
+
+### Initialize
+
+```bash
+expbox init --project demo --config configs/base.yaml --logger file
+```
+
+Prints the new `<exp_id>`.
+
+### Load an experiment
+
+```bash
+expbox load 241126-1030-demo
+```
+
+Outputs metadata as JSON.
+
+### Save / finalize
+
+```bash
+expbox save 241126-1030-demo --status done --final-note "finished"
+```
+
+---
+
+# Configuration Snapshot
+
+`config` can be:
+
+* a Python dict (recommended)
+* a path to YAML/JSON
+* or `None`
+
+The effective config is always stored in:
+
+```text
+results/<exp_id>/artifacts/config.yaml
+```
+
+Snapshots are **immutable** once created (append-only).
+
+---
+
+# Logging Details
+
+### Metrics
+
+```python
+xb.log_metrics(step=step, loss=loss, acc=acc)
+```
+
+Metrics are stored as JSON lines under:
+
+```text
+results/<exp_id>/logs/metrics.jsonl
+```
+
+### Tables
+
+```python
+xb.log_table("eval", df)  # df.to_csv(...) will be called
+```
+
+By default this saves:
+
+```text
+results/<exp_id>/artifacts/eval.csv
+```
+
+### Figures
+
+```python
+xb.log_figure("roc_curve", fig)
+```
+
+By default this saves:
+
+```text
+results/<exp_id>/figures/roc_curve.png
+```
+
+---
+
+# Reproducibility Metadata
+
+`meta.json` automatically records:
+
+* timestamps (`created_at`, `finished_at`)
+* git commits (`start_commit`, `last_commit`)
+* dirty files
+* environment note
+* status
+* config snapshot path
+* logger backend
+
+You can also edit notes via shortcuts:
+
+```python
+xb.final_note("best model among seeds")
+xb.set_status("done")
+xb.save()
+```
+
+---
+
+# Philosophy
+
+expbox is built on three principles:
+
+1. **Local-first, project-native**
+   No servers, no dashboards — everything lives inside your repo.
+
+2. **Non-intrusive**
+   It never tells you how to structure your experiments.
+   It only helps you **track** what you already do.
+
+3. **Safe, append-only**
+   No automatic deletion.
+   Saving is always incremental.
+   Reproducibility information is guaranteed to be preserved.
+
+---
+
+# Recommended Project Layout
+
+```text
+your-project/
+  src/
+  notebooks/
+  configs/
+  results/
+  .expbox/active
+  pyproject.toml
+```
+
+expbox does **not** require this layout, but it works well in practice.
+
+---
+
+# Installation
+
+From PyPI:
 
 ```bash
 pip install expbox
 ```
 
-Optional extras:
+For development:
 
 ```bash
-pip install "expbox[yaml]"    # Enable YAML config support
-pip install "expbox[wandb]"   # Enable W&B logger backend
-```
-
-Dev install:
-
-```bash
-git clone https://github.com/your-org/expbox
-cd expbox
-pip install -e .[dev]
-pytest
+pip install -e .
 ```
 
 ---
 
-## Getting Started
+# License
 
-### 1. Clone your project (recommended flow)
+MIT License.
 
-```bash
-git clone https://github.com/you/your-project
-cd your-project
-```
-
-Use your preferred layout; expbox does **not** enforce any structure:
-
-```text
-your-project/
-  data/             # any size, usually not tracked by Git
-  src/              # your scripts
-  configs/          # optional config directory
-  notebooks/        # optional
-  pyproject.toml    # or requirements.txt, etc.
-  results/          # <-- created by expbox
-```
-
-The only directory expbox touches is:
-
-```
-results/
-```
-
-### 2. Place data wherever *you* want
-
-expbox never manages your data.
-Load it however your workflow already does:
-
-```python
-df = pd.read_csv("data/train.csv")
-# or "datasets/liver/train.pkl"
-```
-
-### 3. Use Git commits as your timeline
-
-* You edit code (`src/`) and configs (`configs/`)
-* You commit frequently:
-
-```bash
-git add src/ configs/
-git commit -m "tune lr"
-```
-
-Git stays in control of the code timeline.
-expbox simply records snapshots along that timeline.
-
----
-
-## Workflow Philosophy
-
-### `init` — *start a new story / phase*
-
-Call `xb.init(...)` **once** when starting a new experiment series:
-
-```python
-ctx = xb.init(project="ToxModel", title="baseline-series")
-```
-
-### `git commit` — *often*
-
-Edit → run → commit as usual.
-This is your main unit of iteration.
-
-### `save` — *when you want a snapshot*
-
-Call `xb.save(ctx)` only when you want to bookmark progress:
-
-* after a batch of runs
-* after tuning hyperparams
-* before trying a risky fix
-* at the end of a work session
-* before switching branches
-
-```python
-ctx.meta.final_note = "seed sweep finished"
-xb.save(ctx)
-```
-
-You can call `save` many times for the same experiment box.
-
-### `init` again — *when the story changes*
-
-Only when a new idea / dataset / model family starts:
-
-```python
-ctx = xb.init(project="ToxModel", title="contrastive-learning-v2")
-```
-
----
-
-## A Typical Day with expbox + GitHub
-
-```
-git clone your-project
-cd your-project
-
-# new story
-python src/train_baseline.py     → xb.init()
-
-# work continues
-git commit -m "refactor training loop"
-python src/train_baseline.py     → xb.save()
-
-git commit -m "tune lr"
-python src/train_baseline.py     → xb.save()
-
-# conclude the story
-ctx.meta.status = "completed"
-xb.save(ctx)
-```
-
-The box now contains **snapshots** tied to specific commits.
-
-To reproduce:
-
-```
-git checkout <git.last.commit>
-python src/train_baseline.py
-```
-
-
-## How `results/` evolves in your project
-
-The `results/` directory is the **only place** expbox touches.
-It acts as a **gallery of experiment boxes**, growing over time as your research progresses.
-
-```
-your-project/
-  src/
-  data/
-  configs/
-  results/
-    241201-1530-baseline/        ← created by xb.init()
-    241202-1120-baseline/        ← new story → xb.init()
-    241202-1745-lr-sweep/        ← new story → xb.init()
-    241205-0910-adv-eval/        ← new story → xb.init()
-```
-
-Each entry under `results/` is one **experiment story** (one box).
-
-### A box evolves with `save`
-
-Inside one box:
-
-```
-results/241201-1530-baseline/
-  meta.json             ← updated each time you xb.save()
-  artifacts/
-    config.yaml         ← snapshot from init()
-    model.pt
-  logs/
-    metrics.jsonl
-  figures/
-    loss_curve.png
-```
-
-* **`save` does NOT create a new box.**
-  Instead, it updates the *same* box:
-
-  * updates `meta.json` (git.last, notes, timestamps)
-  * writes more figures/logs/artifacts
-  * preserves the history of your experiment series
-
-### A new box only appears when YOU start a new story
-
-You get a new directory under `results/` **only when you call `xb.init()`**:
-
-```
-ctx = xb.init(project="ToxModel", title="contrastive-v2")
-```
-
-This produces:
-
-```
-results/241205-0910-adv-eval/
-```
-
-This separation naturally organizes your project:
-
-* Code timeline → **Git commits**
-* Story timeline → **expbox boxes**
-
----
-
-## Visual timeline diagram (optional but helpful)
-
-```
-git commits:   C1 ---- C2 ---- C3 ---- C4 ---- C5 ---- C6 ---- C7
-                 \      \      \            \
-expbox boxes:    [baseline box]             [lr-sweep box]
-                     |     |     |             |      |
-                   save   save  save         save   save
-```
-
-* Frequent **Git commits** reflect your coding iteration
-* Occasional **expbox save snapshots** preserve important milestones
-* **New expbox box** only when the story / experiment phase changes
-
----
-
-## Short Summary
-
-| Action               | Effect on `results/`                                        |
-| -------------------- | ----------------------------------------------------------- |
-| `xb.init()`          | **Creates a NEW box** under `results/`                      |
-| `xb.save(ctx)`       | **Updates the SAME box** (snapshot)                         |
-| `git commit`         | No change to `results/`; expbox records commit on next save |
-| New story/experiment | Call `xb.init()` → new directory appears                    |
-
-
----
-
-## Quick Start (Python)
-
-```python
-import expbox as xb
-import torch
-import matplotlib.pyplot as plt
-
-# Start a new experiment series
-ctx = xb.init(
-    project="ToxModel",
-    title="baseline-series",
-    config={"lr": 1e-3, "epochs": 5},
-    logger="file",
-)
-
-model = torch.nn.Linear(10, 1)
-opt = torch.optim.Adam(model.parameters(), lr=ctx.config["lr"])
-
-# Training loop
-for step in range(100):
-    loss = (model(torch.randn(8, 10)) ** 2).mean()
-    loss.backward(); opt.step(); opt.zero_grad()
-    ctx.logger.log_metrics(step=step, loss=float(loss))
-
-# Create a snapshot
-ctx.meta.final_note = "initial baseline run finished"
-xb.save(ctx)
-```
-
----
-
-## Quick Start (CLI)
-
-CLI usage mirrors the Python API:
-
-```bash
-# Create a new experiment box — prints exp_id
-exp_id=$(expbox init --project MyProj --config configs/base.yaml --logger file)
-echo "Experiment box: $exp_id"
-
-# ...run your script multiple times as you iterate...
-
-# Save a snapshot with a note
-expbox save "$exp_id" --final-note "batch completed"
-
-# You may call `expbox save` as many times as you want for the same box.
-```
-
----
-
-## HPC-safe Example (rank-0 pattern)
-
-```python
-import os
-import expbox as xb
-
-rank = int(os.environ.get("RANK", 0))  # DDP / SLURM / MPI
-
-if rank == 0:
-    ctx = xb.init(project="HPC-demo", config="configs/train.yaml", logger="file")
-else:
-    ctx = None
-
-for step in range(200):
-    loss = train_step()
-    if rank == 0:
-        ctx.logger.log_metrics(step=step, loss=float(loss))
-
-if rank == 0:
-    ctx.meta.final_note = "HPC batch snapshot"
-    xb.save(ctx)
-```
-
----
-
-## Git Metadata Structure
-
-Each box stores a structured snapshot:
-
-```json
-"git": {
-  "repo_root": "/abs/path/to/repo",
-  "project_relpath": "src",
-  "start": {
-    "commit": "a1b2c3d4",
-    "branch": "dev-route3",
-    "dirty": true,
-    "captured_at": "2025-11-25T10:00:00Z"
-  },
-  "last": {
-    "commit": "9a0b1c2d",
-    "branch": "main",
-    "dirty": false,
-    "saved_at": "2025-11-26T08:30:00Z"
-  },
-  "dirty_files": ["src/model.py", "configs/baseline.yaml"],
-  "remote": {
-    "name": "origin",
-    "url": "git@github.com:you/your-project.git",
-    "github_commit_url": "https://github.com/you/your-project/commit/9a0b1c2d"
-  }
-}
-```
-
----
-
-## Philosophy Summary
-
-* **Your project stays yours.**
-  expbox adds nothing except `results/`.
-
-* **Git is your timeline.**
-  Commit freely; expbox simply records what matters.
-
-* **Save when you want a snapshot.**
-  Not more, not less.
-
-* **Init only when the story changes.**
-  Each box = a chapter in your research.
-
----
-
-## Author
-
-**Tadahaya Mizuno**
-tadahayamiz (at) gmail.com
-
-MIT License
-
----
+# Author
+Tadahaya Mizuno (tadahayamiz)
