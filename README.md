@@ -196,7 +196,17 @@ xb.save()
   1. **Start a new box (`xb.init()`), or**
   2. Delete files manually via `xb.paths.*` (your responsibility).
 
-This preserves safety, transparency, and local-first principles.
+This preserves safety, transparency, and local-first principles.  
+Note: expbox also stores the ID of the *current active experiment* in a small
+file at the project root:
+
+  ```
+  .expbox/active
+  ```
+
+This file is **local state only** (it simply remembers the last active box)
+and is **automatically recreated** when needed.  
+It is recommended to add `.expbox/` to `.gitignore`.
 
 ---
 
@@ -335,9 +345,9 @@ your-project/
   src/
   notebooks/
   configs/
-  results/
-  .expbox/active
   pyproject.toml
+  results/  # expbox made
+  .expbox/active  # expbox made (recommended to add `.expbox/` to gitignore)
 ```
 
 expbox does **not** require this layout, but it works well in practice.
