@@ -50,6 +50,40 @@ No servers, no daemons, no databases — everything lives in your project folder
 
 ---
 
+# Philosophy
+
+expbox is built on three principles:
+
+1. **Local-first, project-native**
+   No servers, no dashboards — everything lives inside your repo.
+
+2. **Non-intrusive**
+   It never tells you how to structure your experiments.
+   It only helps you **track** what you already do.
+
+3. **Safe, append-only**
+   No automatic deletion.
+   Saving is always incremental.
+   Reproducibility information is guaranteed to be preserved.
+
+---
+
+# Installation
+
+From PyPI:
+
+```bash
+pip install expbox
+```
+
+For development:
+
+```bash
+pip install -e .
+```
+
+---
+
 # Quick Start (Python)
 
 ```python
@@ -320,24 +354,6 @@ xb.save()
 
 ---
 
-# Philosophy
-
-expbox is built on three principles:
-
-1. **Local-first, project-native**
-   No servers, no dashboards — everything lives inside your repo.
-
-2. **Non-intrusive**
-   It never tells you how to structure your experiments.
-   It only helps you **track** what you already do.
-
-3. **Safe, append-only**
-   No automatic deletion.
-   Saving is always incremental.
-   Reproducibility information is guaranteed to be preserved.
-
----
-
 # Recommended Project Layout
 
 ```text
@@ -351,22 +367,6 @@ your-project/
 ```
 
 expbox does **not** require this layout, but it works well in practice.
-
----
-
-# Installation
-
-From PyPI:
-
-```bash
-pip install expbox
-```
-
-For development:
-
-```bash
-pip install -e .
-```
 
 ---
 
