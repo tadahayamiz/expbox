@@ -13,17 +13,21 @@ Initialize a new experiment:
 
     expbox init --project myproj --config configs/baseline.yaml --logger file
 
+Or with an inline JSON config:
+
+    expbox init --project myproj --config '{"lr": 0.001, "epochs": 5}'
+
 Load and inspect an experiment:
 
-    expbox load EXP_ID
+    expbox load EXP_ID --results-root results
 
-Finalize an experiment (mark as done):
+Mark an experiment as done:
 
-    expbox save EXP_ID --status done
+    expbox save EXP_ID --status done --final-note "OK"
 
-Export a CSV summary of all experiments:
+Export metadata of all experiments under results_root:
 
-    expbox export-csv --results-root results --output expbox_experiments.csv
+    expbox export-csv --results-root results --output expbox_export.csv
 
 Notes
 -----
@@ -38,6 +42,7 @@ from typing import Any, Dict, Optional, List
 
 from . import init as xb_init, load as xb_load, save as xb_save
 from .tools import export_csv as tools_export_csv
+from .exceptions import ConfigLoadError
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +51,9 @@ from .tools import export_csv as tools_export_csv
 
 
 def _add_common_init_args(parser: argparse.ArgumentParser) -> None:
+    """
+    Arguments shared by the `init` subcommand.
+    """
     parser.add_argument(
         "--project",
         type=str,
@@ -56,36 +64,39 @@ def _add_common_init_args(parser: argparse.ArgumentParser) -> None:
         "--title",
         type=str,
         default=None,
-        help="Short human-readable title for this experiment.",
+        help="Optional human-readable title for this experiment.",
     )
     parser.add_argument(
         "--purpose",
         type=str,
         default=None,
-        help="Short free-text description of the experiment purpose.",
+        help="Optional short description of the experiment's purpose.",
     )
     parser.add_argument(
         "--config",
         type=str,
         default=None,
-        help="Path to a JSON or YAML config file.",
+        help=(
+            "Path to a JSON/YAML config file, or a JSON string "
+            'like \'{"lr": 0.001}\'.'
+        ),
     )
     parser.add_argument(
         "--results-root",
         type=str,
         default="results",
-        help='Directory under which experiments are stored (default: "results").',
+        help='Root directory under which experiment boxes are stored (default: "results").',
     )
     parser.add_argument(
         "--exp-id",
         type=str,
         default=None,
-        help="Explicit experiment ID (otherwise auto-generated).",
+        help="Optional explicit experiment id to use (normally auto-generated).",
     )
     parser.add_argument(
         "--logger",
         type=str,
-        default="none",
+        default="file",
         choices=["none", "file"],
         help='Logger backend to use ("none" or "file").',
     )
@@ -103,6 +114,65 @@ def _add_common_init_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_common_loadsave_args(parser: argparse.ArgumentParser) -> None:
+    """
+    Arguments shared by `load` / `save` subcommands.
+    """
+    parser.add_argument(
+        "--results-root",
+        type=str,
+        default="results",
+        help='Root directory under which experiment boxes are stored (default: "results").',
+    )
+    parser.add_argument(
+        "--logger",
+        type=str,
+        default="file",
+        choices=["none", "file"],
+        help='Logger backend to use ("none" or "file").',
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_config_arg(config_arg: Optional[str]):
+    """
+    Parse the --config argument.
+
+    Behavior:
+    - If config_arg is None/empty: return (None, None)
+    - If it is a path to an existing file: return (None, Path)
+    - Otherwise, try to parse as JSON and expect a mapping: return (dict, None)
+    - If neither works, raise ConfigLoadError.
+
+    Returns
+    -------
+    (config_obj, config_path)
+        Exactly one of them will be non-None if config_arg was provided.
+    """
+    if not config_arg:
+        return None, None  # (config_obj, config_path)
+
+    # 1) Treat as file path if it exists
+    p = Path(config_arg)
+    if p.exists():
+        return None, p
+
+    # 2) Fallback: treat as JSON string
+    try:
+        obj = json.loads(config_arg)
+    except json.JSONDecodeError:
+        raise ConfigLoadError(f"Config file does not exist: {config_arg}")
+
+    if not isinstance(obj, dict):
+        raise ConfigLoadError("--config JSON must be an object (mapping)")
+
+    return obj, None
+
+
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
@@ -112,11 +182,19 @@ def _cmd_init(args: argparse.Namespace) -> int:
     """
     Initialize a new experiment and print its exp_id.
     """
+    config_obj, config_path = _parse_config_arg(args.config)
+
+    # config can be either a dict (in-memory) or a path (JSON/YAML file)
+    if config_obj is not None:
+        config_for_init = config_obj
+    else:
+        config_for_init = config_path  # may be None or Path
+
     ctx = xb_init(
         project=args.project,
         title=args.title,
         purpose=args.purpose,
-        config=args.config,
+        config=config_for_init,
         results_root=args.results_root,
         exp_id=args.exp_id,
         logger=args.logger,
@@ -143,40 +221,36 @@ def _cmd_load(args: argparse.Namespace) -> int:
         "title": ctx.meta.title,
         "purpose": ctx.meta.purpose,
         "status": ctx.meta.status,
+        "final_note": ctx.meta.final_note,
         "created_at": ctx.meta.created_at,
         "finished_at": ctx.meta.finished_at,
         "results_root": str(Path(args.results_root).resolve()),
         "root": str(ctx.paths.root),
         "logger_backend": ctx.meta.logger_backend,
     }
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 
 
 def _cmd_save(args: argparse.Namespace) -> int:
     """
-    Mark an experiment as finished (or update its status) and save.
+    Save (update) an experiment's metadata.
+
+    This is a thin wrapper around :func:`expbox.save`.
     """
-    ctx = xb_load(
+    xb_save(
         exp_id=args.exp_id,
         results_root=args.results_root,
         logger=args.logger,
-    )
-
-    xb_save(
         status=args.status,
         final_note=args.final_note,
-        update_git=not args.no_update_git,
     )
-    print(f"Saved experiment: {ctx.meta.exp_id}")
     return 0
 
 
 def _cmd_export_csv(args: argparse.Namespace) -> int:
     """
-    Export a CSV summary of all experiments under a results root.
-
-    Thin wrapper around :func:`expbox.tools.export_csv`.
+    Export experiment metadata under results_root to a CSV file.
     """
     fields: Optional[List[str]] = None
     if args.fields:
@@ -197,87 +271,75 @@ def _cmd_export_csv(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    """
-    CLI entry point.
-    """
-    parser = argparse.ArgumentParser(prog="expbox", description="expbox CLI")
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="expbox",
+        description="Command-line interface for expbox experiment boxes.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # init
-    p_init = subparsers.add_parser("init", help="Initialize a new experiment.")
+    p_init = subparsers.add_parser(
+        "init",
+        help="Initialize a new experiment box.",
+    )
     _add_common_init_args(p_init)
     p_init.set_defaults(func=_cmd_init)
 
     # load
-    p_load = subparsers.add_parser("load", help="Load and summarize an experiment.")
-    p_load.add_argument("exp_id", type=str, help="Experiment ID to load.")
-    p_load.add_argument(
-        "--results-root",
-        type=str,
-        default="results",
-        help='Directory under which experiments are stored (default: "results").',
+    p_load = subparsers.add_parser(
+        "load",
+        help="Load an existing experiment and print a JSON summary.",
     )
     p_load.add_argument(
-        "--logger",
+        "exp_id",
         type=str,
-        default="none",
-        choices=["none", "file"],
-        help='Logger backend to use when loading ("none" or "file").',
+        help="Experiment id to load.",
     )
+    _add_common_loadsave_args(p_load)
     p_load.set_defaults(func=_cmd_load)
 
     # save
-    p_save = subparsers.add_parser("save", help="Finalize an experiment.")
-    p_save.add_argument("exp_id", type=str, help="Experiment ID to save/finalize.")
-    p_save.add_argument(
-        "--results-root",
-        type=str,
-        default="results",
-        help='Directory under which experiments are stored (default: "results").',
+    p_save = subparsers.add_parser(
+        "save",
+        help="Update metadata for an existing experiment.",
     )
     p_save.add_argument(
-        "--logger",
+        "exp_id",
         type=str,
-        default="none",
-        choices=["none", "file"],
-        help='Logger backend to attach while saving ("none" or "file").',
+        help="Experiment id to save/update.",
     )
+    _add_common_loadsave_args(p_save)
     p_save.add_argument(
         "--status",
         type=str,
-        default="done",
-        help='New status string (default: "done").',
+        default=None,
+        help="Optional new status string to set.",
     )
     p_save.add_argument(
         "--final-note",
         type=str,
         default=None,
-        help="Optional final note summarizing the experiment.",
-    )
-    p_save.add_argument(
-        "--no-update-git",
-        action="store_true",
-        help="Do not refresh Git metadata on save.",
+        help="Optional final_note string to set.",
     )
     p_save.set_defaults(func=_cmd_save)
 
     # export-csv
     p_export = subparsers.add_parser(
         "export-csv",
-        help="Export a CSV summary of all experiments under a results root.",
+        help="Export experiment metadata to a CSV file.",
     )
     p_export.add_argument(
         "--results-root",
         type=str,
         default="results",
-        help='Directory containing experiment boxes (default: "results").',
+        help='Root directory under which experiment boxes are stored (default: "results").',
     )
     p_export.add_argument(
         "--output",
         type=str,
-        default="expbox_experiments.csv",
-        help='Path to the output CSV file (default: "expbox_experiments.csv").',
+        required=True,
+        help="Path to output CSV file.",
     )
     p_export.add_argument(
         "--fields",
