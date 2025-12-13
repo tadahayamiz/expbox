@@ -375,4 +375,4 @@ expbox does **not** require this layout, but it works well in practice.
 MIT License.
 
 # Author
-Tadahaya Mizuno (tadahayamiz)
+- Tadahaya Mizuno ([tadahayamiz](https://github.com/tadahayamiz))
