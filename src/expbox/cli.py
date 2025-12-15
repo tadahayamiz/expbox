@@ -243,17 +243,18 @@ def _cmd_save(args: argparse.Namespace) -> int:
     """
     # Reload context in a stateless way
     ctx = xb_load(
-        args.exp_id,
+        args.exp_id,  # None is OK (falls back to active)
         results_root=args.results_root,
         logger=args.logger,
         set_active=False,
     )
 
-    # Update metadata
+    # Update metadata and save
     xb_save(
         ctx,
         status=args.status,
         final_note=args.final_note,
+        verbose=(not args.quiet),
     )
     return 0
 
@@ -317,20 +318,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_save.add_argument(
         "exp_id",
         type=str,
-        help="Experiment id to save/update.",
+        nargs="?",          
+        default=None,       
+        help="Experiment id to save/update. If omitted, uses .expbox/active.",
     )
     _add_common_loadsave_args(p_save)
+    p_save.add_argument("--status", type=str, default=None, help="Optional new status string to set.")
+    p_save.add_argument("--final-note", type=str, default=None, help="Optional final_note string to set.")
     p_save.add_argument(
-        "--status",
-        type=str,
-        default=None,
-        help="Optional new status string to set.",
-    )
-    p_save.add_argument(
-        "--final-note",
-        type=str,
-        default=None,
-        help="Optional final_note string to set.",
+        "--quiet",
+        action="store_true",
+        help="Suppress save summary output.",
     )
     p_save.set_defaults(func=_cmd_save)
 

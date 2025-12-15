@@ -137,3 +137,78 @@ def test_cli_export_csv(tmp_path: Path) -> None:
     header = lines[0].split(",")
     assert "exp_id" in header
     assert "project" in header
+
+
+def test_cli_save_without_exp_id_uses_active(tmp_path: Path) -> None:
+    # init (this writes .expbox/active because CLI init calls xb.init with default set_active=True)
+    r_init = run_cli(
+        [
+            "init",
+            "--project", "cli-save-active",
+            "--config", json.dumps({"lr": 1e-3}),
+            "--results-root", str(tmp_path),
+            "--logger", "none",
+        ],
+        cwd=tmp_path,
+    )
+    assert r_init.returncode == 0, r_init.stderr
+    exp_id = r_init.stdout.strip()
+    assert exp_id
+
+    # save WITHOUT exp_id
+    r_save = run_cli(
+        [
+            "save",
+            "--results-root", str(tmp_path),
+            "--logger", "none",
+            "--status", "done",
+            "--final-note", "ok",
+        ],
+        cwd=tmp_path,
+    )
+    assert r_save.returncode == 0, r_save.stderr
+    # default verbose=True → should print summary
+    assert "[expbox] saved" in r_save.stdout
+    assert exp_id in r_save.stdout
+
+    # load back
+    r_load = run_cli(
+        [
+            "load",
+            exp_id,
+            "--results-root", str(tmp_path),
+            "--logger", "none",
+        ],
+        cwd=tmp_path,
+    )
+    meta = json.loads(r_load.stdout)
+    assert meta["status"] == "done"
+    assert meta["final_note"] == "ok"
+
+
+def test_cli_save_quiet_suppresses_output(tmp_path: Path) -> None:
+    r_init = run_cli(
+        [
+            "init",
+            "--project", "cli-save-quiet",
+            "--config", json.dumps({"lr": 1e-3}),
+            "--results-root", str(tmp_path),
+            "--logger", "none",
+        ],
+        cwd=tmp_path,
+    )
+    exp_id = r_init.stdout.strip()
+    assert exp_id
+
+    r_save = run_cli(
+        [
+            "save",
+            "--quiet",
+            "--results-root", str(tmp_path),
+            "--logger", "none",
+            "--status", "done",
+        ],
+        cwd=tmp_path,
+    )
+    assert r_save.returncode == 0, r_save.stderr
+    assert "[expbox] saved" not in r_save.stdout

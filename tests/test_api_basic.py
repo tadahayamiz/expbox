@@ -102,12 +102,20 @@ def test_active_box_shortcuts(tmp_path: Path) -> None:
         logger="none",
     )
 
-    # Active box 経由で同じ情報が取れるか
     assert xb.exp_id == ctx.exp_id
     assert xb.paths.root == ctx.paths.root
     assert xb.meta.project == "testproj"
     assert xb.config["lr"] == 1e-3
 
     xb.meta.final_note = "done"
-    xb.save()  # ctx なしで保存
+    xb.save()
     assert xb.meta.final_note == "done"
+
+
+def test_save_verbose_prints_summary(tmp_path: Path, capsys) -> None:
+    os.chdir(tmp_path)
+    ctx = xb.init(project="vprint", config={}, results_root=tmp_path, logger="none")
+    xb.save(ctx)  # default verbose=True
+    out = capsys.readouterr().out
+    assert "[expbox] saved" in out
+    assert ctx.exp_id in out

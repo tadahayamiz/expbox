@@ -153,6 +153,8 @@ def load(
 
 def save(
     ctx: Optional[ExpContext] = None,
+    *,
+    verbose: bool = True,
     **kwargs,
 ) -> None:
     """
@@ -163,6 +165,8 @@ def save(
     ctx:
         Experiment context to save. If omitted, uses the currently active
         context (see :func:`get_active`).
+    verbose:
+        If True (default), print a one-shot summary including exp_id and git commit.
     **kwargs:
         Passed through to :func:`expbox.api.save_exp`, e.g.:
 
@@ -172,7 +176,7 @@ def save(
     """
     if ctx is None:
         ctx = _require_active()
-    save_exp(ctx, **kwargs)
+    save_exp(ctx, verbose=verbose, **kwargs)
 
 
 # ---------------------------------------------------------------------------

@@ -506,7 +506,7 @@ def _build_index_record(ctx: ExpContext) -> Dict[str, Any]:
                 "branch": git_last.get("branch"),
                 "dirty": git_last.get("dirty"),
                 "saved_at": git_last.get("saved_at"),
-                "subject": git_start.get("subject"),
+                "subject": git_last.get("subject"),
             },
             "remote": git_section.get("remote"),
         },
@@ -750,6 +750,7 @@ def save_exp(
     status: Optional[str] = None,
     final_note: Optional[str] = None,
     update_git: bool = True,
+    verbose: bool = True,
 ) -> None:
     """
     Save a snapshot of an experiment and persist its metadata.
@@ -778,6 +779,8 @@ def save_exp(
     update_git:
         If True, refreshes Git metadata at save-time. If False, keeps the
         existing values (useful for debugging or deterministic tests).
+    verbose:
+        If True, prints a brief message to stdout upon successful save.
 
     Raises
     ------
@@ -825,3 +828,25 @@ def save_exp(
     except Exception as e:  # pragma: no cover
         # We do not want a logging close failure to silently pass in tests.
         raise ResultsIOError(f"Failed to close logger for exp {meta.exp_id}: {e}")
+
+    # Verbose output
+    if verbose:
+        git = meta.git or {}
+        last = (git.get("last") or {}) if isinstance(git, dict) else {}
+        commit = last.get("commit") or meta.git_commit
+        branch = last.get("branch")
+        dirty = last.get("dirty")
+        subject = last.get("subject")
+
+        short = commit[:7] if isinstance(commit, str) and len(commit) >= 7 else commit
+        dirty_str = "dirty" if dirty else "clean" if dirty is not None else "unknown"
+
+        print(
+            "[expbox] saved\n"
+            f"  exp_id : {meta.exp_id}\n"
+            f"  project: {meta.project}\n"
+            f"  status : {meta.status}\n"
+            f"  git    : {(branch or '-') } @ {(short or '-') } ({dirty_str})\n"
+            f"  path   : {ctx.paths.root}"
+            + (f"\n  subject: {subject}" if subject else "")
+        )
