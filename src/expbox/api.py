@@ -27,7 +27,7 @@ Design principles
 """
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
@@ -46,6 +46,7 @@ from .io import (
     load_meta,
     save_meta,
     snapshot_config,
+    save_index_record,
 )
 from .logger import BaseLogger, FileLogger, NullLogger
 
@@ -183,7 +184,7 @@ def _init_git_section(project_root: Path) -> Dict[str, Any]:
     if status is None:
         return {}
 
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     try:
         project_relpath = str(project_root.resolve().relative_to(repo_root))
@@ -241,7 +242,7 @@ def _update_git_on_save(meta: ExpMeta) -> None:
                 "commit": status["commit"],
                 "branch": status["branch"],
                 "dirty": status["dirty"],
-                "saved_at": datetime.utcnow().isoformat(),
+                "saved_at": datetime.now(timezone.utc).isoformat(),
             }
         )
         git_section["last"] = last
@@ -381,6 +382,141 @@ def _build_logger(
 # ---------------------------------------------------------------------------
 # Public API functions (backing xb.init / xb.load / xb.save)
 # ---------------------------------------------------------------------------
+def _as_relpath(path: Path, base: Path) -> str:
+    """
+    Convert `path` to a path relative to `base` if possible; otherwise return str(path).
+    """
+    try:
+        return str(path.resolve().relative_to(base.resolve()))
+    except Exception:
+        return str(path)
+
+
+def _sanitize_index_record(record: Dict[str, Any], *, privacy: str) -> Dict[str, Any]:
+    """
+    Apply privacy rules to a structured index record.
+
+    safe:
+      - no absolute paths (keep relative-only where possible)
+      - drop dirty_files
+      - drop dataset path
+      - drop env_auto keys that may leak runtime paths/cluster hints (if present)
+
+    full:
+      - keep as-is
+    """
+    if privacy != "safe":
+        return record
+
+    rec = dict(record)
+
+    # Paths: keep only relpaths (already designed to be rel), ensure no absolute fallbacks
+    paths = dict(rec.get("paths") or {})
+    for k in ("project_root_rel", "box_rel", "config_rel"):
+        v = paths.get(k)
+        if not isinstance(v, str) or not v:
+            continue
+        try:
+            if Path(v).is_absolute():
+                paths[k] = ""
+        except Exception:
+            # If v isn't a valid path string, keep it as-is.
+            pass
+    rec["paths"] = paths
+
+    # Drop dirty_files entirely
+    if "dirty_files" in rec:
+        rec.pop("dirty_files", None)
+
+    # Config-derived dataset path is most sensitive
+    cfgd = dict(rec.get("config_derived") or {})
+    ds = dict(cfgd.get("dataset") or {})
+    if "path" in ds:
+        ds["path"] = None
+    cfgd["dataset"] = ds
+    rec["config_derived"] = cfgd
+
+    # Env auto: keep coarse info only (platform/gpu/cuda_visible_devices)
+    env_auto = dict(rec.get("env_auto") or {})
+    safe_env = {
+        "platform": env_auto.get("platform"),
+        "gpu": env_auto.get("gpu"),
+        "cuda_visible_devices": env_auto.get("cuda_visible_devices"),
+    }
+    rec["env_auto"] = safe_env
+
+    return rec
+
+
+def _build_index_record(ctx: ExpContext) -> Dict[str, Any]:
+    """
+    Build a structured index record (full) from an ExpContext.
+    The caller applies privacy sanitization.
+    """
+    meta = ctx.meta
+    extra = meta.extra or {}
+    env_auto = extra.get("env_auto") or {}
+
+    git_section: Dict[str, Any] = dict(meta.git or {})
+    git_start = dict(git_section.get("start") or {})
+    git_last = dict(git_section.get("last") or {})
+
+    # Best-effort config-derived dataset fields (expects config like {"dataset": {...}})
+    dataset = {}
+    if isinstance(ctx.config, dict):
+        dataset = ctx.config.get("dataset") or {}
+    elif isinstance(ctx.config, Mapping):
+        dataset = dict(ctx.config).get("dataset") or {}
+
+    project_root = Path.cwd().resolve()
+    box_root = ctx.paths.root
+
+    record: Dict[str, Any] = {
+        "schema_version": 1,
+        "exp_id": meta.exp_id,
+        "project": meta.project,
+        "title": meta.title,
+        "purpose": meta.purpose,
+        "status": meta.status,
+        "created_at": meta.created_at,
+        "finished_at": meta.finished_at,
+        "final_note": meta.final_note,
+        "env_note": meta.env_note,
+        "logger_backend": meta.logger_backend,
+        "paths": {
+            # keep relative paths to project root where possible
+            "project_root_rel": ".",  # explicit anchor
+            "box_rel": _as_relpath(box_root, project_root),
+            "config_rel": meta.config_path or "",
+        },
+        "git": {
+            "start": {
+                "commit": git_start.get("commit"),
+                "branch": git_start.get("branch"),
+                "dirty": git_start.get("dirty"),
+            },
+            "last": {
+                "commit": git_last.get("commit"),
+                "branch": git_last.get("branch"),
+                "dirty": git_last.get("dirty"),
+                "saved_at": git_last.get("saved_at"),
+            },
+            "remote": git_section.get("remote"),
+        },
+        # full record keeps dirty files (safe will drop this)
+        "dirty_files": {
+            "files": git_section.get("dirty_files") or [],
+        },
+        "env_auto": env_auto,
+        "config_derived": {
+            "dataset": {
+                "name": dataset.get("name") if isinstance(dataset, dict) else None,
+                "path": dataset.get("path") if isinstance(dataset, dict) else None,
+                "version": dataset.get("version") if isinstance(dataset, dict) else None,
+            }
+        },
+    }
+    return record
 
 
 def init_exp(
@@ -650,7 +786,7 @@ def save_exp(
         meta.final_note = final_note
 
     # Timestamp: last snapshot/save time
-    meta.finished_at = datetime.utcnow().isoformat()
+    meta.finished_at = datetime.now(timezone.utc).isoformat()
 
     # Refresh git metadata if requested (best-effort)
     if update_git:
@@ -665,6 +801,16 @@ def save_exp(
         save_meta(meta, ctx.paths.root)
     except Exception as e:  # pragma: no cover
         raise ResultsIOError(f"Failed to write meta.json for exp {meta.exp_id}: {e}")
+
+    # Write/update per-experiment index record under .expbox/index/<exp_id>.json
+    # Index is best-effort: failures must not break save_exp.
+    try:
+        privacy = (meta.extra or {}).get("privacy") or "safe"
+        record_full = _build_index_record(ctx)
+        record = _sanitize_index_record(record_full, privacy=str(privacy))
+        save_index_record(meta.exp_id, record)
+    except Exception:
+        pass
 
     # Close logger (best-effort but reported)
     try:

@@ -24,7 +24,7 @@ import csv
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from ..io import load_meta, load_config  # ExpMeta + config snapshot loader
+from ..io import load_meta, load_config, load_index_record  # read-only loaders
 
 
 # ---------------------------------------------------------------------------
@@ -82,97 +82,134 @@ def _load_config_snapshot(box_root: Path, meta: Any) -> Dict[str, Any]:
         return {}
 
 
+def flatten_index_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert a structured index record into a flat row for CSV/Notion.
+
+    This preserves your current column schema as much as possible.
+    """
+    row: Dict[str, Any] = {}
+
+    row["exp_id"] = record.get("exp_id")
+    row["project"] = record.get("project")
+    row["title"] = record.get("title")
+    row["purpose"] = record.get("purpose")
+    row["status"] = record.get("status")
+    row["created_at"] = record.get("created_at")
+    row["finished_at"] = record.get("finished_at")
+
+    paths = record.get("paths") or {}
+    # keep compatibility with existing export columns:
+    # results_path/config_path were absolute before; now use rel paths
+    row["results_path"] = paths.get("box_rel") or ""
+    cfg_rel = paths.get("config_rel") or ""
+    row["config_path"] = (f"{paths.get('box_rel')}/{cfg_rel}" if cfg_rel else "")
+
+    git = record.get("git") or {}
+    gstart = (git.get("start") or {})
+    glast = (git.get("last") or {})
+
+    row["git_start_commit"] = gstart.get("commit")
+    row["git_last_commit"] = glast.get("commit")
+    row["git_start_branch"] = gstart.get("branch")
+    row["git_last_branch"] = glast.get("branch")
+
+    # dirty_files: optional (safe may omit it)
+    dirty_files = record.get("dirty_files") or {}
+    files = dirty_files.get("files")
+    if isinstance(files, list):
+        row["dirty_files"] = ",".join(files)
+    else:
+        row["dirty_files"] = ""
+
+    env_auto = record.get("env_auto") or {}
+    row["env_platform"] = env_auto.get("platform")
+    row["env_gpu"] = str(env_auto.get("gpu"))
+    row["env_cuda_visible_devices"] = env_auto.get("cuda_visible_devices")
+
+    row["env_note"] = record.get("env_note")
+    row["final_note"] = record.get("final_note")
+
+    cfgd = record.get("config_derived") or {}
+    ds = cfgd.get("dataset") or {}
+    row["cfg_dataset_name"] = ds.get("name")
+    row["cfg_dataset_path"] = ds.get("path")
+    row["cfg_dataset_version"] = ds.get("version")
+
+    row["logger_backend"] = record.get("logger_backend")
+
+    return row
+
+
 def summarize_box(box_root: Path) -> Dict[str, Any]:
     """
-    Build a flat summary record for a single experiment box.
+    Build a structured summary record for a single experiment box.
 
-    The record is intended to be used as a single CSV row or as a
-    "Notion row" for an experiment database. It flattens information
-    from:
-
-    - ``meta.json`` (via :func:`expbox.io.load_meta`)
-    - the config snapshot (if available, via ``config_path``)
-    - auto-collected environment info (``meta.extra['env_auto']` if present)
-
-    Parameters
-    ----------
-    box_root:
-        Root directory of the experiment (e.g. ``results/<exp_id>``).
-
-    Returns
-    -------
-    dict
-        Flat mapping of field names to values.
+    Priority:
+    1) If .expbox/index/<exp_id>.json exists, use it.
+    2) Otherwise, build a record from meta.json + config snapshot (read-only).
     """
     box_root = box_root.resolve()
-    meta = load_meta(box_root)
+    exp_id = box_root.name
 
-    # ExpMeta has .extra; if that ever changes, we can still fall back gracefully.
+    idx = load_index_record(exp_id)
+    if isinstance(idx, dict) and idx.get("exp_id") == exp_id:
+        return idx
+
+    meta = load_meta(box_root)
     extra = getattr(meta, "extra", None) or {}
     env_auto = extra.get("env_auto") or {}
 
     git_section: Dict[str, Any] = dict(meta.git or {})
-    git_start = git_section.get("start") or {}
-    git_last = git_section.get("last") or {}
+    git_start = dict(git_section.get("start") or {})
+    git_last = dict(git_section.get("last") or {})
 
     cfg = _load_config_snapshot(box_root, meta)
     dataset = cfg.get("dataset") or {} if isinstance(cfg, dict) else {}
 
-    row: Dict[str, Any] = {}
-
-    # Core metadata
-    row["exp_id"] = meta.exp_id
-    row["project"] = meta.project
-    row["title"] = meta.title
-    row["purpose"] = meta.purpose
-    row["status"] = meta.status
-    row["created_at"] = meta.created_at
-    row["finished_at"] = meta.finished_at
-
-    # Paths
-    row["results_path"] = str(box_root)
-    if meta.config_path:
-        row["config_path"] = str(box_root / meta.config_path)
-    else:
-        row["config_path"] = ""
-
-    # Git (best-effort)
-    row["git_start_commit"] = git_start.get("commit")
-    row["git_last_commit"] = git_last.get("commit")
-    row["git_start_branch"] = git_start.get("branch")
-    row["git_last_branch"] = git_last.get("branch")
-
-    dirty_start = git_start.get("dirty_files") or git_section.get("dirty_files") or []
-    dirty_last = git_last.get("dirty_files") or git_section.get("dirty_files") or []
-    if isinstance(dirty_start, list):
-        row["dirty_files_start"] = ",".join(dirty_start)
-    else:
-        row["dirty_files_start"] = str(dirty_start) if dirty_start else ""
-    if isinstance(dirty_last, list):
-        row["dirty_files_last"] = ",".join(dirty_last)
-    else:
-        row["dirty_files_last"] = str(dirty_last) if dirty_last else ""
-
-    # Environment (auto + manual)
-    row["env_platform"] = env_auto.get("platform")
-    row["env_gpu"] = str(env_auto.get("gpu"))
-    row["env_cuda_visible_devices"] = env_auto.get("cuda_visible_devices")
-    row["env_note"] = meta.env_note
-
-    # Notes
-    row["final_note"] = meta.final_note
-
-    # Config-derived (optional / best-effort)
-    if isinstance(dataset, dict):
-        row["cfg_dataset_name"] = dataset.get("name")
-        row["cfg_dataset_path"] = dataset.get("path")
-        row["cfg_dataset_version"] = dataset.get("version")
-    else:
-        row["cfg_dataset_name"] = None
-        row["cfg_dataset_path"] = None
-        row["cfg_dataset_version"] = None
-
-    return row
+    # Build a structured record (full-ish) similar to what api.save_exp writes.
+    record: Dict[str, Any] = {
+        "schema_version": 1,
+        "exp_id": meta.exp_id,
+        "project": meta.project,
+        "title": meta.title,
+        "purpose": meta.purpose,
+        "status": meta.status,
+        "created_at": meta.created_at,
+        "finished_at": meta.finished_at,
+        "final_note": meta.final_note,
+        "env_note": meta.env_note,
+        "logger_backend": meta.logger_backend,
+        "paths": {
+            "project_root_rel": ".",
+            "box_rel": str(box_root),
+            "config_rel": meta.config_path or "",
+        },
+        "git": {
+            "start": {
+                "commit": git_start.get("commit"),
+                "branch": git_start.get("branch"),
+                "dirty": git_start.get("dirty"),
+            },
+            "last": {
+                "commit": git_last.get("commit"),
+                "branch": git_last.get("branch"),
+                "dirty": git_last.get("dirty"),
+                "saved_at": git_last.get("saved_at"),
+            },
+            "remote": git_section.get("remote"),
+        },
+        "dirty_files": {"files": git_section.get("dirty_files") or []},
+        "env_auto": env_auto,
+        "config_derived": {
+            "dataset": {
+                "name": dataset.get("name") if isinstance(dataset, dict) else None,
+                "path": dataset.get("path") if isinstance(dataset, dict) else None,
+                "version": dataset.get("version") if isinstance(dataset, dict) else None,
+            }
+        },
+    }
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +268,8 @@ def export_csv(
     Path
         The resolved path to the written CSV file.
     """
-    rows = summarize_boxes(results_root)
+    records = summarize_boxes(results_root)
+    rows = [flatten_index_record(r) for r in records]
     csv_path = Path(csv_path).resolve()
 
     if not rows:
