@@ -206,6 +206,7 @@ from typing import Optional  # すでに import 済みなら不要
 
 _ACTIVE_STATE_DIR = ".expbox"
 _ACTIVE_STATE_FILE = "active"
+_INDEX_DIR = "index"
 
 
 def _get_project_root(start: Optional[Path] = None) -> Path:
@@ -259,3 +260,53 @@ def get_active_exp_id(project_root: Optional[Path] = None) -> Optional[str]:
         return None
     text = path.read_text(encoding="utf-8").strip()
     return text or None
+
+
+def get_index_dir(project_root: Optional[Path] = None) -> Path:
+    """
+    Return the directory used to store expbox index records.
+
+    Typically: <project_root>/.expbox/index
+    """
+    state_dir = _get_state_dir(project_root)
+    index_dir = state_dir / _INDEX_DIR
+    index_dir.mkdir(parents=True, exist_ok=True)
+    return index_dir
+
+
+def save_index_record(
+    exp_id: str,
+    record: Mapping[str, Any],
+    project_root: Optional[Path] = None,
+) -> Path:
+    """
+    Write a single experiment index record as JSON:
+      <project_root>/.expbox/index/<exp_id>.json
+    """
+    index_dir = get_index_dir(project_root)
+    path = index_dir / f"{exp_id}.json"
+    try:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(dict(record), f, indent=2, ensure_ascii=False)
+    except Exception as e:  # pragma: no cover
+        raise ResultsIOError(f"Failed to write index record at {path}: {e}")
+    return path
+
+
+def load_index_record(
+    exp_id: str,
+    project_root: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Read a single index record. Returns None if missing or unreadable.
+    """
+    index_dir = get_index_dir(project_root)
+    path = index_dir / f"{exp_id}.json"
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
