@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 from datetime import datetime
+import os
+import json
 
 import expbox as xb
 
 
 def test_init_creates_structure(tmp_path: Path) -> None:
+    os.chdir(tmp_path)
+
     ctx = xb.init(
         project="testproj",
         config={"lr": 1e-3},
@@ -36,6 +40,8 @@ def test_init_creates_structure(tmp_path: Path) -> None:
 
 
 def test_load_roundtrip(tmp_path: Path) -> None:
+    os.chdir(tmp_path)
+
     # init
     ctx = xb.init(
         project="roundtripproj",
@@ -43,6 +49,7 @@ def test_load_roundtrip(tmp_path: Path) -> None:
         results_root=tmp_path,
         logger="none",
     )
+
     exp_id = ctx.exp_id
 
     # modify meta, save
@@ -59,6 +66,8 @@ def test_load_roundtrip(tmp_path: Path) -> None:
 
 
 def test_save_sets_finished_at(tmp_path: Path) -> None:
+    os.chdir(tmp_path)
+
     ctx = xb.init(
         project="finishproj",
         config={},
@@ -74,9 +83,16 @@ def test_save_sets_finished_at(tmp_path: Path) -> None:
     dt = datetime.fromisoformat(ctx.meta.finished_at)
     assert isinstance(dt, datetime)
 
+    # check that finished_at is updated on subsequent saves
+    index_path = tmp_path / ".expbox" / "index" / f"{ctx.exp_id}.json"
+    assert index_path.exists()
+
+    # load index record
+    data = json.loads(index_path.read_text())
+    assert "dirty_files" not in data
+
 
 def test_active_box_shortcuts(tmp_path: Path) -> None:
-    import os
     os.chdir(tmp_path)
 
     ctx = xb.init(

@@ -1,5 +1,5 @@
 # expbox  
-*A lightweight, local-first experiment box for Python.*
+*A lightweight, local-first experiment box for Git-based Python research.*
 
 `expbox` gives each experiment its own **box** — a directory such as:
 
@@ -13,8 +13,8 @@ results/
     notebooks/
 ````
 
-It provides a **minimal, non-intrusive Python API** for managing configs, logs, metadata, and reproducibility information.
-No servers, no daemons, no databases — everything lives in your project folder.
+It provides a **minimal, non-intrusive Python API** for managing configs, logs, metadata, and reproducibility information.  
+No servers, no daemons, no databases — everything lives on user-controlled filesystems.
 
 ---
 
@@ -31,9 +31,9 @@ No servers, no daemons, no databases — everything lives in your project folder
 
 * **Reproducibility baked in**
 
+  * Git-anchored snapshots (start / last commit; best-effort, read-only)
   * config snapshot (`artifacts/config.yaml`)
-  * Git state (`start_commit`, `last_commit`, `dirty_files`)
-  * metadata timestamping (`created_at`, `finished_at`)
+  * timestamped metadata (`created_at`, `finished_at`)
 
 * **Zero magic**
   Files go exactly where you expect them to go.
@@ -44,8 +44,7 @@ No servers, no daemons, no databases — everything lives in your project folder
 
   ```bash
   expbox init ...
-  expbox load <exp_id>
-  expbox save <exp_id> --status done
+  expbox save <exp_id>
   ```
 
 ---
@@ -55,7 +54,10 @@ No servers, no daemons, no databases — everything lives in your project folder
 expbox is built on three principles:
 
 1. **Local-first, project-native**
-   No servers, no dashboards — everything lives inside your repo.
+   No experiment management servers, no dashboards, no databases.
+   All experiment data lives on user-controlled filesystems
+   (local machines, HPC clusters, or shared storage),
+   and is managed directly as files.
 
 2. **Non-intrusive**
    It never tells you how to structure your experiments.
@@ -90,17 +92,17 @@ pip install -e .
 import expbox as xb
 
 # 1) create a new experiment box (also becomes the active box)
-xb.init(project="demo", config={"lr": 1e-3}, logger="file")
+xb.init(project="demo", config={"lr": 1e-3}, logger="file")  # logger is optional
 
-# 2) log metrics, tables, and figures
+# (optional) log metrics, tables, and figures
+# You can skip logging entirely if you manage logs elsewhere (e.g. W&B).
 for step in range(100):
     loss = ...
     xb.log_metrics(step=step, loss=float(loss))
-
 xb.log_table("eval", df)        # df: e.g., pandas.DataFrame
 xb.log_figure("roc", fig)       # fig: e.g., matplotlib.figure.Figure
 
-# 3) add a final note and save
+# 2) add a final note and save
 xb.final_note("Initial test run.")
 xb.set_status("done")
 xb.save()
@@ -171,10 +173,36 @@ results/
 ---
 
 # Usage Patterns (Best Practices)
+expbox supports multiple usage styles, from minimal experiment tracking
+to full experiment notebook workflows.  
 
-## 1. Scratch Box Mode
+## 1. Minimal Mode (Box + Git snapshot)
+
+**For users who already use external logging tools (e.g. W&B, MLflow),
+or manage results manually.**
+
+1. `xb.init(...)` to create a box
+2. run your experiment
+3. commit your code
+4. `xb.save(...)` to record the snapshot
+
+This mode uses expbox purely as a local experiment box
+anchored to Git commits.
+
+## 2. Local Helper Mode
+
+Use expbox helpers (`log_metrics`, `log_figure`, `log_table`) to organize
+lightweight local results when you do not rely on external tracking services.
+All helpers are optional.
+
+## 3. Scratch / Story Box Modes
 
 **For early, messy, exploratory experiments**
+
+These modes treat each experiment box as a lab notebook page,
+supporting exploratory (scratch) and result-oriented (story) workflows.
+
+### 3-1. Scratch Box Mode
 
 * Use a **single box** for a while
 * Let files accumulate
@@ -193,7 +221,7 @@ for trial in range(20):
 
 ---
 
-## 2. Story Box Mode
+### 3-2. Story Box Mode
 
 **When results start to matter (e.g., for papers or reports)**
 
@@ -240,7 +268,17 @@ file at the project root:
 
 This file is **local state only** (it simply remembers the last active box)
 and is **automatically recreated** when needed.  
-It is recommended to add `.expbox/` to `.gitignore`.
+
+In addition, expbox maintains a lightweight experiment index under:
+
+  ```
+  .expbox/index/
+  ```
+
+Each experiment is summarized as a single JSON file
+(`<exp_id>.json`) containing privacy-safe metadata.
+This index can be safely committed and used for lightweight project-wide
+overviews, listing, export, or reporting, even when `results/` is not tracked by Git.
 
 ---
 
@@ -335,14 +373,15 @@ results/<exp_id>/figures/roc_curve.png
 `meta.json` automatically records:
 
 * timestamps (`created_at`, `finished_at`)
-* git commits (`start_commit`, `last_commit`)
-* dirty files
-* environment info
-  * `xb.env` (auto-collected OS / Python / GPU / CUDA / SLURM snapshot)
-  * `xb.meta.env_note` (free-text, user-provided)
+* Git-anchored snapshots (commit hashes, branches; read-only)
+* optional dirty state indicators
+* privacy-aware environment snapshots (coarse-grained by default)
 * status
 * config snapshot path
 * logger backend
+
+By default, expbox records metadata in a **privacy-safe** manner.
+More detailed information can be enabled explicitly when needed.
 
 You can also edit notes via shortcuts:
 
@@ -363,10 +402,15 @@ your-project/
   configs/
   pyproject.toml
   results/  # expbox made
-  .expbox/active  # expbox made (recommended to add `.expbox/` to gitignore)
+  .expbox/  # expbox made
+    active
+    index
+
 ```
 
-expbox does **not** require this layout, but it works well in practice.
+expbox does **not** require this layout, but it works well in practice.  
+Note: `results/` typically contains local experiment artifacts and
+is not expected to be tracked in public Git repositories.
 
 ---
 
