@@ -100,6 +100,7 @@ def test_cli_save(tmp_path: Path) -> None:
 
 
 def test_cli_export_csv(tmp_path: Path) -> None:
+    import time
     # init 2 experiments
     exp_ids = []
     for name in ["expA", "expB"]:
@@ -114,6 +115,7 @@ def test_cli_export_csv(tmp_path: Path) -> None:
             cwd=tmp_path,
         )
         exp_ids.append(r.stdout.strip())
+        time.sleep(2)  # ensure different timestamps
 
     # export csv
     out_csv = tmp_path / "expbox_export.csv"
