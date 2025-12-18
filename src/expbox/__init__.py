@@ -37,6 +37,8 @@ from typing import Any, Optional
 from .api import init_exp, load_exp, save_exp
 from .core import ExpContext, ExpMeta, ExpPaths
 from .io import get_active_exp_id, set_active_exp_id
+from .exceptions import MetaNotFoundError, ResultsIOError
+
 
 # ---------------------------------------------------------------------------
 # Package version
@@ -59,12 +61,31 @@ _active_ctx: Optional[ExpContext] = None
 def _require_active() -> ExpContext:
     """
     Return the currently active experiment context, or raise a helpful error.
+    Also validates that the active context points to a real box on disk.
     """
     if _active_ctx is None:
         raise RuntimeError(
-            "No active experiment box. "
-            "Call expbox.init(...) or expbox.load(...) first."
+            "No active experiment box.\n"
+            "Next steps:\n"
+            "  - xb.init(...)              # start a new box\n"
+            "  - xb.load('<exp_id>')       # resume a specific existing box\n"
+            "  - xb.load()                 # resume from .expbox/active (only if it is valid)\n"
         )
+
+    exp_root = _active_ctx.paths.root
+    meta_path = exp_root / "meta.json"
+
+    if not exp_root.exists() or not meta_path.exists():
+        raise RuntimeError(
+            "Active experiment is invalid or missing on disk.\n"
+            f"  active exp_id: {_active_ctx.exp_id}\n"
+            f"  expected path: {exp_root}\n\n"
+            "Next steps:\n"
+            "  - xb.init(...)              # start a new box\n"
+            "  - xb.load('<exp_id>')       # resume a specific existing box\n"
+            "  - xb.load()                 # resume from .expbox/active (only if it is valid)\n"
+        )
+
     return _active_ctx
 
 
@@ -118,21 +139,6 @@ def load(
 ) -> ExpContext:
     """
     Load an existing experiment and (optionally) make it active.
-
-    Parameters
-    ----------
-    exp_id:
-        Experiment id to load. If omitted, tries to read from
-        `.expbox/active`. If that also fails, raises RuntimeError.
-    set_active:
-        If True (default), the loaded experiment becomes the active box.
-    **kwargs:
-        Passed through to :func:`expbox.api.load_exp`
-        (e.g., results_root, logger).
-
-    Returns
-    -------
-    ExpContext
     """
     global _active_ctx
 
@@ -140,14 +146,49 @@ def load(
         exp_id = get_active_exp_id()
         if not exp_id:
             raise RuntimeError(
-                "No exp_id was given and no active experiment was found "
-                "under .expbox/active. Call expbox.init(...) first."
+                "No exp_id was given and no active experiment was found under .expbox/active.\n"
+                "Next steps:\n"
+                "  - xb.init(...)              # start a new box\n"
+                "  - xb.load('<exp_id>')       # resume a specific existing box\n"
             )
 
-    ctx = load_exp(exp_id=exp_id, **kwargs)
+    # --- minimal on-disk validation (quiet but effective) ---
+    results_root = kwargs.get("results_root", "results")
+    exp_root = (results_root / exp_id) if hasattr(results_root, "__truediv__") else None
+    if exp_root is None:
+        # results_root is likely str/path-like; rely on Path ops via load_exp, but we can still check meta by constructing Path
+        from pathlib import Path  # local import to keep module imports clean
+        exp_root = Path(results_root) / exp_id
+
+    meta_path = exp_root / "meta.json"
+    if not exp_root.exists() or not meta_path.exists():
+        raise RuntimeError(
+            "Requested experiment is missing on disk.\n"
+            f"  exp_id: {exp_id}\n"
+            f"  expected path: {exp_root}\n\n"
+            "Next steps:\n"
+            "  - xb.init(...)              # start a new box\n"
+            "  - xb.load('<exp_id>')       # resume a specific existing box\n"
+            "  - xb.load()                 # resume from .expbox/active (only if it is valid)\n"
+        )
+
+    try:
+        ctx = load_exp(exp_id=exp_id, **kwargs)
+    except (MetaNotFoundError, ResultsIOError) as e:
+        raise RuntimeError(
+            "Failed to load experiment metadata.\n"
+            f"  exp_id: {exp_id}\n"
+            f"  path: {exp_root}\n"
+            f"  reason: {e}\n\n"
+            "Next steps:\n"
+            "  - xb.init(...)              # start a new box\n"
+            "  - xb.load('<exp_id>')       # resume a specific existing box\n"
+        ) from e
+
     if set_active:
         _active_ctx = ctx
         set_active_exp_id(ctx.exp_id)
+
     return ctx
 
 
