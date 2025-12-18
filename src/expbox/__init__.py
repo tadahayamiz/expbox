@@ -33,10 +33,11 @@ Advanced users can still access the lower-level API:
 
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Optional
+from pathlib import Path
 
 from .api import init_exp, load_exp, save_exp
 from .core import ExpContext, ExpMeta, ExpPaths
-from .io import get_active_exp_id, set_active_exp_id
+from .io import get_active_exp_id, set_active_exp_id, load_meta
 from .exceptions import MetaNotFoundError, ResultsIOError
 
 
@@ -220,6 +221,80 @@ def save(
     save_exp(ctx, verbose=verbose, **kwargs)
 
 
+def archive(
+    exp_id: Optional[str] = None,
+    *,
+    results_root: str | Path = "results",
+    logger: str = "none",
+    reason: Optional[str] = None,
+    status: str = "aborted",
+    superseded_by: Optional[str] = None,
+    verbose: bool = False,
+) -> None:
+    """
+    Soft-archive an experiment box (non-destructive).
+
+    This updates meta.json and .expbox/index/<exp_id>.json but never deletes files.
+    """
+    if exp_id is None:
+        ctx = _require_active()
+    else:
+        # Use low-level loader to avoid changing the in-process active box
+        ctx = load_exp(exp_id=exp_id, results_root=results_root, logger=logger)
+
+    ctx.meta.status = status
+
+    if reason:
+        note = f"[archive] {reason}"
+        ctx.meta.final_note = note if not ctx.meta.final_note else ctx.meta.final_note + "\n" + note
+
+    if superseded_by:
+        extra = ctx.meta.extra or {}
+        extra["superseded_by"] = superseded_by
+        ctx.meta.extra = extra
+
+    save_exp(ctx, verbose=verbose)
+
+
+def sweep(
+    *,
+    results_root: str | Path = "results",
+    mark: str = "stale",
+    dry_run: bool = False,
+    logger: str = "none",
+) -> list[str]:
+    """
+    Sweep unfinished boxes and mark them as stale (non-destructive).
+
+    Target definition:
+      status == "running" AND finished_at is None
+
+    Returns the list of affected exp_ids.
+    """
+    from .tools.export import iter_boxes  # local import to keep top-level light
+
+    affected: list[str] = []
+    root = Path(results_root)
+
+    for box_root in iter_boxes(root):
+        meta = load_meta(box_root)
+        if meta.status == "running" and meta.finished_at is None:
+            affected.append(meta.exp_id)
+            if dry_run:
+                continue
+
+            ctx = load_exp(exp_id=meta.exp_id, results_root=results_root, logger=logger)
+            ctx.meta.status = mark
+
+            note = "[sweep] detected as stale (no save)"
+            ctx.meta.final_note = note if not ctx.meta.final_note else ctx.meta.final_note + "\n" + note
+
+            # best-effort: do not spam stdout
+            save_exp(ctx, verbose=False)
+
+    return affected
+
+
 # ---------------------------------------------------------------------------
 # Public high-level logging & meta shortcuts
 # ---------------------------------------------------------------------------
@@ -303,7 +378,6 @@ def set_status(status: str) -> None:
     ctx = _require_active()
     ctx.meta.status = status
 
-
 # ---------------------------------------------------------------------------
 # Dynamic attribute forwarding to the active context
 # ---------------------------------------------------------------------------
@@ -334,6 +408,8 @@ __all__ = [
     "init",
     "load",
     "save",
+    "archive",
+    "sweep",
     "get_active",
     "log_metrics",
     "log_table",

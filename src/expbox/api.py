@@ -675,6 +675,15 @@ def init_exp(
         logger=logger_backend,
     )
 
+    # After constructing ctx in init_exp()
+    try:
+        privacy = (meta.extra or {}).get("privacy") or "safe"
+        record_full = _build_index_record(ctx)
+        record = _sanitize_index_record(record_full, privacy=str(privacy))
+        save_index_record(meta.exp_id, record)
+    except Exception:
+        pass
+
     return ctx
 
 

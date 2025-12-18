@@ -212,3 +212,54 @@ def test_cli_save_quiet_suppresses_output(tmp_path: Path) -> None:
     )
     assert r_save.returncode == 0, r_save.stderr
     assert "[expbox] saved" not in r_save.stdout
+
+
+def test_cli_archive_marks_aborted(tmp_path: Path) -> None:
+    # init
+    r = run_cli(
+        ["init", "--project", "demo", "--results-root", "results", "--logger", "none"],
+        cwd=tmp_path,
+    )
+    exp_id = r.stdout.strip()
+    assert exp_id
+
+    # archive
+    r2 = run_cli(
+        ["archive", exp_id, "--results-root", "results", "--logger", "none", "--reason", "mistake"],
+        cwd=tmp_path,
+    )
+    assert r2.returncode == 0
+
+    # meta.json should reflect the status
+    meta_path = tmp_path / "results" / exp_id / "meta.json"
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert data["status"] == "aborted"
+    assert "mistake" in (data.get("final_note") or "")
+
+
+def test_cli_sweep_marks_stale(tmp_path: Path) -> None:
+    # init (creates meta.json with status=running; finished_at should be None)
+    r = run_cli(
+        ["init", "--project", "demo", "--results-root", "results", "--logger", "none"],
+        cwd=tmp_path,
+    )
+    exp_id = r.stdout.strip()
+    assert exp_id
+
+    meta_path = tmp_path / "results" / exp_id / "meta.json"
+    before = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert before["status"] == "running"
+    assert before.get("finished_at") is None
+
+    # sweep
+    r2 = run_cli(
+        ["sweep", "--results-root", "results", "--mark", "stale", "--logger", "none"],
+        cwd=tmp_path,
+    )
+    assert r2.returncode == 0
+    out = json.loads(r2.stdout)
+    assert exp_id in out["affected"]
+
+    after = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert after["status"] == "stale"
+    assert "sweep" in (after.get("final_note") or "")

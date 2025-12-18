@@ -175,6 +175,7 @@ results/
 # Usage Patterns (Best Practices)
 expbox supports multiple usage styles, from minimal experiment tracking
 to full experiment notebook workflows.  
+Common statuses: `running`, `done`, `failed`, `aborted`, `stale`, `superseded`  
 
 ## 1. Minimal Mode (Box + Git snapshot)
 
@@ -187,7 +188,9 @@ or manage results manually.**
 4. `xb.save(...)` to record the snapshot
 
 This mode uses expbox purely as a local experiment box
-anchored to Git commits.
+anchored to Git commits.  
+If an experiment crashes or you forget to call `save()`, run `expbox sweep`
+to mark unfinished boxes as `stale` while keeping the Git anchor.
 
 ## 2. Local Helper Mode
 
@@ -278,7 +281,9 @@ In addition, expbox maintains a lightweight experiment index under:
 Each experiment is summarized as a single JSON file
 (`<exp_id>.json`) containing privacy-safe metadata.
 This index can be safely committed and used for lightweight project-wide
-overviews, listing, export, or reporting, even when `results/` is not tracked by Git.
+overviews, listing, export, or reporting, even when `results/` is not tracked by Git.  
+For cleanup without deletion, use `expbox archive` (mark aborted/superseded)
+or `expbox sweep` (mark stale boxes that were never saved).  
 
 ---
 
