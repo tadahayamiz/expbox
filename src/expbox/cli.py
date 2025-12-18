@@ -40,7 +40,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
-from . import init as xb_init, load as xb_load, save as xb_save
+from . import init as xb_init, load as xb_load, save as xb_save, archive as xb_archive, sweep as xb_sweep
+
 from .tools import export_csv as tools_export_csv
 from .exceptions import ConfigLoadError
 
@@ -259,6 +260,39 @@ def _cmd_save(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_archive(args: argparse.Namespace) -> int:
+    """
+    Soft-archive an experiment box (non-destructive).
+    """
+    xb_archive(
+        args.exp_id,
+        results_root=args.results_root,
+        logger=args.logger,
+        reason=args.reason,
+        status=args.status,
+        superseded_by=args.superseded_by,
+        verbose=(not args.quiet),
+    )
+    return 0
+
+
+def _cmd_sweep(args: argparse.Namespace) -> int:
+    """
+    Sweep unfinished boxes and mark them as stale (non-destructive).
+    """
+    affected = xb_sweep(
+        results_root=args.results_root,
+        mark=args.mark,
+        dry_run=args.dry_run,
+        logger=args.logger,
+    )
+    if args.dry_run:
+        print(json.dumps({"dry_run": True, "affected": affected}, indent=2))
+    else:
+        print(json.dumps({"dry_run": False, "affected": affected}, indent=2))
+    return 0
+
+
 def _cmd_export_csv(args: argparse.Namespace) -> int:
     """
     Export experiment metadata under results_root to a CSV file.
@@ -331,6 +365,42 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Suppress save summary output.",
     )
     p_save.set_defaults(func=_cmd_save)
+
+    # archive
+    p_archive = subparsers.add_parser(
+        "archive",
+        help="Soft-archive an experiment box (mark status and keep metadata).",
+    )
+    p_archive.add_argument(
+        "exp_id",
+        type=str,
+        nargs="?",
+        default=None,
+        help="Experiment id to archive. If omitted, uses .expbox/active.",
+    )
+    _add_common_loadsave_args(p_archive)
+    p_archive.add_argument("--status", type=str, default="aborted", help="Status to set (default: aborted).")
+    p_archive.add_argument("--reason", type=str, default=None, help="Reason text to append to final_note.")
+    p_archive.add_argument("--superseded-by", type=str, default=None, help="Optional successor exp_id.")
+    p_archive.add_argument("--quiet", action="store_true", help="Suppress output.")
+    p_archive.set_defaults(func=_cmd_archive)
+
+    # sweep
+    p_sweep = subparsers.add_parser(
+        "sweep",
+        help="Sweep unfinished boxes (status=running & finished_at=None) and mark them stale.",
+    )
+    p_sweep.add_argument("--results-root", type=str, default="results")
+    p_sweep.add_argument("--mark", type=str, default="stale", help="Status to set for swept boxes (default: stale).")
+    p_sweep.add_argument("--dry-run", action="store_true", help="List affected boxes without modifying anything.")
+    p_sweep.add_argument(
+        "--logger",
+        type=str,
+        default="file",
+        choices=["none", "file"],
+        help='Logger backend to use when loading boxes ("none" or "file").',
+    )
+    p_sweep.set_defaults(func=_cmd_sweep)
 
     # export-csv
     p_export = subparsers.add_parser(
